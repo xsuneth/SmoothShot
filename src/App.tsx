@@ -99,6 +99,12 @@ function App() {
   const [displaySelection, setDisplaySelection] = useState("auto");
   const [message, setMessage] = useState("Ready for capture.");
   const [fps, setFps] = useState(60);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportPath, setExportPath] = useState("");
+  const [maxZoom, setMaxZoom] = useState(1.85);
+  const [zoomInMs, setZoomInMs] = useState(180);
+  const [holdMs, setHoldMs] = useState(120);
+  const [zoomOutMs, setZoomOutMs] = useState(260);
   const [regionEnabled, setRegionEnabled] = useState(false);
   const [region, setRegion] = useState<CaptureRegion>({
     x: 100,
@@ -111,6 +117,19 @@ function App() {
     () => `${status.targetFps}fps target`,
     [status.targetFps],
   );
+
+  const selectedDisplayLabel = useMemo(() => {
+    if (displaySelection === "auto") {
+      return "Auto display selection";
+    }
+
+    const selected = displays.find((display) => String(display.index) === displaySelection);
+    if (!selected) {
+      return "Custom display selection";
+    }
+
+    return `${selected.isPrimary ? "Primary" : `Display ${selected.index + 1}`} ${selected.width}x${selected.height}`;
+  }, [displaySelection, displays]);
 
   useEffect(() => {
     void loadDisplays();
@@ -174,12 +193,14 @@ function App() {
 
   async function exportRecording() {
     try {
+      setIsExporting(true);
       const exportResult = await invoke<ExportRecordingResponse>("export_recording", {
         request: {
-          maxZoom: 1.85,
-          zoomInMs: 180,
-          holdMs: 120,
-          zoomOutMs: 260,
+          outputPath: exportPath.trim().length > 0 ? exportPath.trim() : null,
+          maxZoom,
+          zoomInMs,
+          holdMs,
+          zoomOutMs,
         },
       });
       setLastExport(exportResult);
@@ -187,6 +208,8 @@ function App() {
       setMessage(`Export completed: ${exportResult.outputPath}`);
     } catch (error) {
       setMessage(String(error));
+    } finally {
+      setIsExporting(false);
     }
   }
 
@@ -232,10 +255,10 @@ function App() {
       const preview = await invoke<ZoomPreviewResponse>("build_zoom_preview", {
         request: {
           limit: 420,
-          zoomInMs: 180,
-          holdMs: 120,
-          zoomOutMs: 260,
-          maxZoom: 1.85,
+          zoomInMs,
+          holdMs,
+          zoomOutMs,
+          maxZoom,
         },
       });
       setZoomPreview(preview);
@@ -246,209 +269,275 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <section className="hero-card">
-        <p className="eyebrow">SmoothShot Studio</p>
-        <h1>Screen Recording Workspace</h1>
-        <p className="status-line">{message}</p>
-      </section>
-
-      <section className="control-card">
-        <div className="control-grid">
-          <label>
-            Display
-            <select
-              value={displaySelection}
-              onChange={(event) => setDisplaySelection(event.currentTarget.value)}
-              disabled={recording}
-            >
-              <option value="auto">Auto (cursor monitor at start)</option>
-              {displays.map((display) => (
-                <option key={display.id} value={display.index}>
-                  {display.isPrimary ? "Primary" : `Display ${display.index + 1}`} - {display.width}x{display.height} @ ({display.x},{display.y})
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Target FPS
-            <input
-              type="number"
-              value={fps}
-              min={24}
-              max={60}
-              onChange={(event) => setFps(Number(event.currentTarget.value))}
-              disabled={recording}
-            />
-          </label>
-          <label className="toggle-row">
-            <input
-              type="checkbox"
-              checked={regionEnabled}
-              onChange={(event) => setRegionEnabled(event.currentTarget.checked)}
-              disabled={recording}
-            />
-            Region mode
-          </label>
-          <label>
-            X
-            <input
-              type="number"
-              value={region.x}
-              onChange={(event) =>
-                setRegion((prev) => ({ ...prev, x: Number(event.currentTarget.value) }))
-              }
-              disabled={!regionEnabled || recording}
-            />
-          </label>
-          <label>
-            Y
-            <input
-              type="number"
-              value={region.y}
-              onChange={(event) =>
-                setRegion((prev) => ({ ...prev, y: Number(event.currentTarget.value) }))
-              }
-              disabled={!regionEnabled || recording}
-            />
-          </label>
-          <label>
-            Width
-            <input
-              type="number"
-              value={region.width}
-              onChange={(event) =>
-                setRegion((prev) => ({ ...prev, width: Number(event.currentTarget.value) }))
-              }
-              disabled={!regionEnabled || recording}
-            />
-          </label>
-          <label>
-            Height
-            <input
-              type="number"
-              value={region.height}
-              onChange={(event) =>
-                setRegion((prev) => ({ ...prev, height: Number(event.currentTarget.value) }))
-              }
-              disabled={!regionEnabled || recording}
-            />
-          </label>
+    <main className="studio-root">
+      <header className="studio-header">
+        <div>
+          <p className="eyebrow">SmoothShot</p>
+          <h1>Studio Recorder</h1>
         </div>
-
-        <div className="button-row">
-          <button type="button" onClick={startRecording} disabled={recording}>
-            Start Recording
-          </button>
-          <button type="button" onClick={stopRecording} disabled={!recording}>
-            Stop Recording
-          </button>
-          <button type="button" onClick={loadDisplays} disabled={recording}>
-            Refresh Displays
-          </button>
-          <button type="button" onClick={exportRecording} disabled={recording}>
-            Export
-          </button>
-          <button type="button" onClick={initializeGpuRenderer}>
-            Init GPU
-          </button>
-          <button type="button" onClick={generateZoomPreview} disabled={recording}>
-            Build Zoom Preview
-          </button>
+        <div className="status-badges">
+          <span className={`badge ${recording ? "badge-live" : "badge-idle"}`}>
+            {recording ? "Recording" : "Idle"}
+          </span>
+          <span className="badge badge-muted">{selectedDisplayLabel}</span>
+          <span className="badge badge-muted">{frameRateText}</span>
         </div>
-      </section>
+      </header>
 
-      <section className="stats-card">
-        <h2>Live Capture State</h2>
-        <div className="stat-grid">
-          <article>
-            <span>Mode</span>
-            <strong>{status.isRecording ? "Recording" : "Idle"}</strong>
-          </article>
-          <article>
-            <span>Frame Budget</span>
-            <strong>{frameRateText}</strong>
-          </article>
-          <article>
-            <span>Frames</span>
-            <strong>{status.framesCaptured.toLocaleString()}</strong>
-          </article>
-          <article>
-            <span>Clicks</span>
-            <strong>{status.clicksDetected.toLocaleString()}</strong>
-          </article>
-        </div>
-      </section>
+      <p className="message-bar">{message}</p>
 
-      <section className="timeline-card">
-        <h2>Recent Click Timeline</h2>
-        <ul>
-          {timeline.length === 0 && <li>No clicks captured yet.</li>}
-          {timeline.map((event, index) => (
-            <li key={`${event.timestampMs}-${index}`}>
-              t={event.timestampMs}ms | {event.button} | ({event.cursorX}, {event.cursorY})
-            </li>
-          ))}
-        </ul>
-        {lastSession && (
-          <p className="session-summary">
-            Last session: {lastSession.framesCaptured} frames in {lastSession.durationMs}ms, {" "}
-            {lastSession.clicksDetected} clicks.
-          </p>
-        )}
-      </section>
+      <section className="workspace-grid">
+        <aside className="panel stack-gap">
+          <div className="panel-block">
+            <h2>Capture</h2>
+            <div className="field-grid">
+              <label>
+                Display
+                <select
+                  value={displaySelection}
+                  onChange={(event) => setDisplaySelection(event.currentTarget.value)}
+                  disabled={recording}
+                >
+                  <option value="auto">Auto (cursor monitor at start)</option>
+                  {displays.map((display) => (
+                    <option key={display.id} value={display.index}>
+                      {display.isPrimary ? "Primary" : `Display ${display.index + 1}`} - {display.width}x{display.height}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-      <section className="timeline-card">
-        <h2>Auto Zoom Preview (v0.2)</h2>
-        {!gpuStatus && <p>GPU renderer not initialized yet.</p>}
-        {gpuStatus && (
-          <p>
-            GPU: {gpuStatus.adapterName ?? "Unknown adapter"} ({gpuStatus.backend ?? "unknown"})
-          </p>
-        )}
-        {!zoomPreview && <p>No preview generated yet.</p>}
-        {zoomPreview && (
-          <>
-            <p>
-              Profile: {zoomPreview.profile.easing}, in {zoomPreview.profile.zoomInMs}ms, hold {" "}
-              {zoomPreview.profile.holdMs}ms, out {zoomPreview.profile.zoomOutMs}ms, max {" "}
-              {zoomPreview.profile.maxZoom.toFixed(2)}x
-            </p>
-            <ul>
-              {zoomPreview.frames.slice(0, 8).map((frame) => (
-                <li key={frame.frameIndex}>
-                  frame {frame.frameIndex} | t={frame.timestampMs}ms | zoom {frame.zoom.toFixed(2)}x | focus ({frame.focusX}, {frame.focusY})
-                  {frame.clickDriven ? " | click" : ""}
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </section>
+              <label>
+                Target FPS
+                <input
+                  type="number"
+                  value={fps}
+                  min={24}
+                  max={60}
+                  onChange={(event) => setFps(Number(event.currentTarget.value))}
+                  disabled={recording}
+                />
+              </label>
 
-      <section className="timeline-card">
-        <h2>Export Output (v0.3)</h2>
-        {!lastExport && <p>No export created yet.</p>}
-        {lastExport && (
-          <>
-            <ul>
-              <li>Path: <span className="path-chip">{lastExport.outputPath}</span></li>
-              <li>Frames: {lastExport.framesExported.toLocaleString()}</li>
-              <li>Video: {lastExport.width}x{lastExport.height}</li>
-              <li>FPS target: {lastExport.targetFps}</li>
-              <li>Duration: {(lastExport.outputDurationMs / 1000).toFixed(2)}s</li>
-            </ul>
-            <div className="button-row">
-              <button type="button" onClick={openExportedFile}>Open Exported File</button>
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={regionEnabled}
+                  onChange={(event) => setRegionEnabled(event.currentTarget.checked)}
+                  disabled={recording}
+                />
+                Region mode
+              </label>
+
+              <label>
+                X
+                <input
+                  type="number"
+                  value={region.x}
+                  onChange={(event) =>
+                    setRegion((prev) => ({ ...prev, x: Number(event.currentTarget.value) }))
+                  }
+                  disabled={!regionEnabled || recording}
+                />
+              </label>
+              <label>
+                Y
+                <input
+                  type="number"
+                  value={region.y}
+                  onChange={(event) =>
+                    setRegion((prev) => ({ ...prev, y: Number(event.currentTarget.value) }))
+                  }
+                  disabled={!regionEnabled || recording}
+                />
+              </label>
+              <label>
+                Width
+                <input
+                  type="number"
+                  value={region.width}
+                  onChange={(event) =>
+                    setRegion((prev) => ({ ...prev, width: Number(event.currentTarget.value) }))
+                  }
+                  disabled={!regionEnabled || recording}
+                />
+              </label>
+              <label>
+                Height
+                <input
+                  type="number"
+                  value={region.height}
+                  onChange={(event) =>
+                    setRegion((prev) => ({ ...prev, height: Number(event.currentTarget.value) }))
+                  }
+                  disabled={!regionEnabled || recording}
+                />
+              </label>
             </div>
-          </>
-        )}
-      </section>
 
-      <section className="timeline-card">
-        <h2>Basic Preview (v0.4)</h2>
-        {!previewUrl && <p>No preview available yet. Export once to preview.</p>}
-        {previewUrl && <video className="preview-player" src={previewUrl} controls preload="metadata" />}
+            <div className="button-row">
+              <button type="button" onClick={startRecording} disabled={recording}>
+                Start
+              </button>
+              <button type="button" onClick={stopRecording} disabled={!recording}>
+                Stop
+              </button>
+              <button type="button" onClick={loadDisplays} disabled={recording}>
+                Refresh Displays
+              </button>
+            </div>
+          </div>
+
+          <div className="panel-block">
+            <h2>Export</h2>
+            <div className="field-grid">
+              <label className="field-span">
+                Output file (optional)
+                <input
+                  type="text"
+                  value={exportPath}
+                  onChange={(event) => setExportPath(event.currentTarget.value)}
+                  placeholder="Example: D:/Videos/smoothshot.mp4"
+                  disabled={recording || isExporting}
+                />
+              </label>
+
+              <label>
+                Max Zoom
+                <input
+                  type="number"
+                  step="0.05"
+                  min="1.05"
+                  max="3"
+                  value={maxZoom}
+                  onChange={(event) => setMaxZoom(Number(event.currentTarget.value))}
+                  disabled={recording || isExporting}
+                />
+              </label>
+
+              <label>
+                Zoom In (ms)
+                <input
+                  type="number"
+                  min="60"
+                  value={zoomInMs}
+                  onChange={(event) => setZoomInMs(Number(event.currentTarget.value))}
+                  disabled={recording || isExporting}
+                />
+              </label>
+
+              <label>
+                Hold (ms)
+                <input
+                  type="number"
+                  min="0"
+                  value={holdMs}
+                  onChange={(event) => setHoldMs(Number(event.currentTarget.value))}
+                  disabled={recording || isExporting}
+                />
+              </label>
+
+              <label>
+                Zoom Out (ms)
+                <input
+                  type="number"
+                  min="80"
+                  value={zoomOutMs}
+                  onChange={(event) => setZoomOutMs(Number(event.currentTarget.value))}
+                  disabled={recording || isExporting}
+                />
+              </label>
+            </div>
+
+            <div className="button-row">
+              <button type="button" onClick={exportRecording} disabled={recording || isExporting}>
+                {isExporting ? "Exporting..." : "Export MP4"}
+              </button>
+              <button type="button" onClick={openExportedFile} disabled={!lastExport}>
+                Open File
+              </button>
+            </div>
+          </div>
+
+          <div className="panel-block">
+            <h2>Engine</h2>
+            <div className="button-row">
+              <button type="button" onClick={initializeGpuRenderer}>Init GPU</button>
+              <button type="button" onClick={generateZoomPreview} disabled={recording}>
+                Build Zoom Preview
+              </button>
+            </div>
+            {gpuStatus && (
+              <p className="micro-text">
+                GPU: {gpuStatus.adapterName ?? "Unknown adapter"} ({gpuStatus.backend ?? "unknown"})
+              </p>
+            )}
+          </div>
+        </aside>
+
+        <section className="panel stack-gap">
+          <div className="panel-block">
+            <h2>Preview</h2>
+            {!previewUrl && <p className="placeholder">Export once to load preview.</p>}
+            {previewUrl && (
+              <video className="preview-player" src={previewUrl} controls preload="metadata" />
+            )}
+          </div>
+
+          <div className="panel-block">
+            <h2>Session Metrics</h2>
+            <div className="stat-grid">
+              <article>
+                <span>Frames</span>
+                <strong>{status.framesCaptured.toLocaleString()}</strong>
+              </article>
+              <article>
+                <span>Clicks</span>
+                <strong>{status.clicksDetected.toLocaleString()}</strong>
+              </article>
+              <article>
+                <span>Last Duration</span>
+                <strong>{lastSession ? `${(lastSession.durationMs / 1000).toFixed(2)}s` : "-"}</strong>
+              </article>
+              <article>
+                <span>Export Duration</span>
+                <strong>{lastExport ? `${(lastExport.outputDurationMs / 1000).toFixed(2)}s` : "-"}</strong>
+              </article>
+            </div>
+          </div>
+
+          <div className="panel-block">
+            <h2>Export Details</h2>
+            {!lastExport && <p className="placeholder">No export yet.</p>}
+            {lastExport && (
+              <ul className="detail-list">
+                <li>Path: <span className="path-chip">{lastExport.outputPath}</span></li>
+                <li>Frames: {lastExport.framesExported.toLocaleString()}</li>
+                <li>Video: {lastExport.width}x{lastExport.height}</li>
+                <li>FPS target: {lastExport.targetFps}</li>
+              </ul>
+            )}
+          </div>
+
+          <div className="panel-block">
+            <h2>Click Timeline</h2>
+            {timeline.length === 0 && <p className="placeholder">No clicks captured yet.</p>}
+            {timeline.length > 0 && (
+              <ul className="detail-list">
+                {timeline.map((event, index) => (
+                  <li key={`${event.timestampMs}-${index}`}>
+                    t={event.timestampMs}ms | {event.button} | ({event.cursorX}, {event.cursorY})
+                  </li>
+                ))}
+              </ul>
+            )}
+            {zoomPreview && (
+              <p className="micro-text">
+                Zoom profile: {zoomPreview.profile.maxZoom.toFixed(2)}x max, {zoomPreview.profile.easing}
+              </p>
+            )}
+          </div>
+        </section>
       </section>
     </main>
   );
