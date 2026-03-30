@@ -12,6 +12,11 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - v0.3 backend MP4 export implementation using FFmpeg with H.264 encoding and 1080p scaling.
 - v0.3 export path now applies click-driven zoom transforms before encoding.
 - v0.3 UI now displays export path and output metadata after completion.
+- v0.4 basic in-app preview player for exported MP4 files.
+
+### Changed
+- Export timing now aligns to real session duration to avoid accelerated playback.
+- Export output metadata now includes computed output duration.
 
 ## [0.1.0] - 2026-03-31
 ### Added

@@ -48,6 +48,11 @@ Deferred by design:
 - Export scales output to 1080p and applies click-driven zoom transform before encoding.
 - UI displays export file path, frame count, and output format metadata.
 
+## v0.4 In-Progress on develop
+
+- Export timing is stabilized against real session duration to avoid fast playback.
+- UI includes a basic preview player for exported MP4 output.
+
 ## Run Locally
 
 ```bash
