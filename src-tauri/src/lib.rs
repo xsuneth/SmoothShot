@@ -133,6 +133,21 @@ struct ExportRecordingResponse {
     output_duration_ms: u128,
 }
 
+#[derive(Debug, Clone)]
+struct SessionCaptureConfig {
+    display_origin_x: i32,
+    display_origin_y: i32,
+    region: Option<CaptureRegion>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExportFrameSample {
+    left_index: usize,
+    right_index: usize,
+    blend: f32,
+    timestamp_ms: u128,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RecordingStatus {
@@ -174,6 +189,7 @@ struct RecorderInner {
     target_fps: u32,
     started_at: Option<Instant>,
     last_session_duration_ms: u128,
+    session_capture: Option<SessionCaptureConfig>,
     stop_signal: Option<Arc<AtomicBool>>,
     handle: Option<JoinHandle<()>>,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
@@ -308,6 +324,24 @@ fn best_zoom_and_focus(
     (best_zoom, focus_x, focus_y)
 }
 
+fn compute_zoom_window(
+    width: u32,
+    height: u32,
+    zoom: f32,
+    focus_x: i32,
+    focus_y: i32,
+) -> (u32, u32, u32, u32) {
+    let crop_w = ((width as f32) / zoom).round().max(1.0) as u32;
+    let crop_h = ((height as f32) / zoom).round().max(1.0) as u32;
+
+    let max_x0 = width.saturating_sub(crop_w) as i32;
+    let max_y0 = height.saturating_sub(crop_h) as i32;
+    let x0 = (focus_x - (crop_w as i32 / 2)).clamp(0, max_x0) as u32;
+    let y0 = (focus_y - (crop_h as i32 / 2)).clamp(0, max_y0) as u32;
+
+    (crop_w, crop_h, x0, y0)
+}
+
 fn apply_zoom_transform_rgba(
     source: &[u8],
     width: u32,
@@ -322,13 +356,7 @@ fn apply_zoom_transform_rgba(
 
     let width_usize = width as usize;
     let height_usize = height as usize;
-    let crop_w = ((width as f32) / zoom).round().max(1.0) as u32;
-    let crop_h = ((height as f32) / zoom).round().max(1.0) as u32;
-
-    let max_x0 = width.saturating_sub(crop_w) as i32;
-    let max_y0 = height.saturating_sub(crop_h) as i32;
-    let x0 = (focus_x - (crop_w as i32 / 2)).clamp(0, max_x0) as u32;
-    let y0 = (focus_y - (crop_h as i32 / 2)).clamp(0, max_y0) as u32;
+    let (crop_w, crop_h, x0, y0) = compute_zoom_window(width, height, zoom, focus_x, focus_y);
 
     let mut output = vec![0_u8; source.len()];
 
@@ -349,11 +377,164 @@ fn apply_zoom_transform_rgba(
     output
 }
 
-fn build_export_frame_indices(
+fn map_point_through_zoom(
+    width: u32,
+    height: u32,
+    zoom: f32,
+    focus_x: i32,
+    focus_y: i32,
+    point_x: i32,
+    point_y: i32,
+) -> (i32, i32) {
+    if zoom <= 1.001 {
+        return (
+            point_x.clamp(0, width.saturating_sub(1) as i32),
+            point_y.clamp(0, height.saturating_sub(1) as i32),
+        );
+    }
+
+    let (crop_w, crop_h, x0, y0) = compute_zoom_window(width, height, zoom, focus_x, focus_y);
+
+    let local_x = (point_x - x0 as i32).clamp(0, crop_w.saturating_sub(1) as i32);
+    let local_y = (point_y - y0 as i32).clamp(0, crop_h.saturating_sub(1) as i32);
+
+    let mapped_x = ((local_x as f32 / crop_w.max(1) as f32) * width as f32).round() as i32;
+    let mapped_y = ((local_y as f32 / crop_h.max(1) as f32) * height as f32).round() as i32;
+
+    (
+        mapped_x.clamp(0, width.saturating_sub(1) as i32),
+        mapped_y.clamp(0, height.saturating_sub(1) as i32),
+    )
+}
+
+fn blend_pixel_rgba(dst: &mut [u8], offset: usize, color: [u8; 4]) {
+    let alpha = color[3] as f32 / 255.0;
+    let inv = 1.0 - alpha;
+    dst[offset] = (dst[offset] as f32 * inv + color[0] as f32 * alpha) as u8;
+    dst[offset + 1] = (dst[offset + 1] as f32 * inv + color[1] as f32 * alpha) as u8;
+    dst[offset + 2] = (dst[offset + 2] as f32 * inv + color[2] as f32 * alpha) as u8;
+    dst[offset + 3] = 255;
+}
+
+fn draw_ring_rgba(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    thickness: i32,
+    color: [u8; 4],
+) {
+    let width_i32 = width as i32;
+    let height_i32 = height as i32;
+    let min_x = (center_x - radius - thickness).clamp(0, width_i32.saturating_sub(1));
+    let max_x = (center_x + radius + thickness).clamp(0, width_i32.saturating_sub(1));
+    let min_y = (center_y - radius - thickness).clamp(0, height_i32.saturating_sub(1));
+    let max_y = (center_y + radius + thickness).clamp(0, height_i32.saturating_sub(1));
+
+    let inner = (radius - thickness).max(0);
+    let outer = radius + thickness;
+    let inner_sq = inner * inner;
+    let outer_sq = outer * outer;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            let dist_sq = dx * dx + dy * dy;
+            if dist_sq >= inner_sq && dist_sq <= outer_sq {
+                let offset = ((y as usize * width as usize) + x as usize) * 4;
+                blend_pixel_rgba(pixels, offset, color);
+            }
+        }
+    }
+}
+
+fn draw_filled_circle_rgba(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: i32,
+    center_y: i32,
+    radius: i32,
+    color: [u8; 4],
+) {
+    let width_i32 = width as i32;
+    let height_i32 = height as i32;
+    let min_x = (center_x - radius).clamp(0, width_i32.saturating_sub(1));
+    let max_x = (center_x + radius).clamp(0, width_i32.saturating_sub(1));
+    let min_y = (center_y - radius).clamp(0, height_i32.saturating_sub(1));
+    let max_y = (center_y + radius).clamp(0, height_i32.saturating_sub(1));
+    let radius_sq = radius * radius;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            if dx * dx + dy * dy <= radius_sq {
+                let offset = ((y as usize * width as usize) + x as usize) * 4;
+                blend_pixel_rgba(pixels, offset, color);
+            }
+        }
+    }
+}
+
+fn draw_cursor_overlay_rgba(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    cursor_x: i32,
+    cursor_y: i32,
+    timestamp_ms: u128,
+    click_events_local: &[(u128, i32, i32)],
+) {
+    draw_filled_circle_rgba(
+        pixels,
+        width,
+        height,
+        cursor_x,
+        cursor_y,
+        6,
+        [36, 206, 229, 255],
+    );
+    draw_ring_rgba(
+        pixels,
+        width,
+        height,
+        cursor_x,
+        cursor_y,
+        9,
+        2,
+        [255, 255, 255, 220],
+    );
+
+    for (click_time, click_x, click_y) in click_events_local {
+        if timestamp_ms < *click_time || timestamp_ms > (*click_time + 340) {
+            continue;
+        }
+
+        let progress = (timestamp_ms - *click_time) as f32 / 340.0;
+        let radius = (12.0 + (20.0 * progress)).round() as i32;
+        let alpha = (220.0 * (1.0 - progress)).round().clamp(0.0, 255.0) as u8;
+        draw_ring_rgba(
+            pixels,
+            width,
+            height,
+            *click_x,
+            *click_y,
+            radius,
+            2,
+            [255, 202, 51, alpha],
+        );
+    }
+}
+
+fn build_export_frame_samples(
     frames: &[RawFrame],
     target_fps: u32,
     total_duration_ms: u128,
-) -> Vec<usize> {
+) -> Vec<ExportFrameSample> {
     if frames.is_empty() {
         return Vec::new();
     }
@@ -366,7 +547,7 @@ fn build_export_frame_indices(
     let effective_duration_ms = total_duration_ms.max(last_frame_timestamp_ms as u128) as f64;
     let output_len = ((effective_duration_ms / interval_ms).floor() as usize).saturating_add(1);
 
-    let mut indices = Vec::with_capacity(output_len.max(frames.len()));
+    let mut samples = Vec::with_capacity(output_len.max(frames.len()));
     let mut source_idx = 0usize;
 
     for output_idx in 0..output_len {
@@ -376,14 +557,66 @@ fn build_export_frame_indices(
         {
             source_idx += 1;
         }
-        indices.push(source_idx);
+
+        let right_idx = (source_idx + 1).min(frames.len() - 1);
+        let left_ts = frames[source_idx].timestamp_ms as f64;
+        let right_ts = frames[right_idx].timestamp_ms as f64;
+        let blend = if right_idx == source_idx || (right_ts - left_ts).abs() < f64::EPSILON {
+            0.0
+        } else {
+            ((output_timestamp_ms - left_ts) / (right_ts - left_ts)).clamp(0.0, 1.0) as f32
+        };
+
+        samples.push(ExportFrameSample {
+            left_index: source_idx,
+            right_index: right_idx,
+            blend,
+            timestamp_ms: output_timestamp_ms.round() as u128,
+        });
     }
 
-    if indices.is_empty() {
-        indices.push(frames.len() - 1);
+    if samples.is_empty() {
+        samples.push(ExportFrameSample {
+            left_index: frames.len() - 1,
+            right_index: frames.len() - 1,
+            blend: 0.0,
+            timestamp_ms: 0,
+        });
     }
 
-    indices
+    samples
+}
+
+fn blend_frames_rgba(left: &[u8], right: &[u8], blend: f32) -> Vec<u8> {
+    if blend <= 0.001 {
+        return left.to_vec();
+    }
+
+    if blend >= 0.999 {
+        return right.to_vec();
+    }
+
+    let inv = 1.0 - blend;
+    let mut out = vec![0_u8; left.len()];
+    for i in 0..left.len() {
+        out[i] = (left[i] as f32 * inv + right[i] as f32 * blend).round() as u8;
+    }
+    out
+}
+
+fn global_to_frame_coords(
+    global_x: i32,
+    global_y: i32,
+    session_capture: &SessionCaptureConfig,
+) -> (i32, i32) {
+    if let Some(region) = &session_capture.region {
+        (global_x - region.x, global_y - region.y)
+    } else {
+        (
+            global_x - session_capture.display_origin_x,
+            global_y - session_capture.display_origin_y,
+        )
+    }
 }
 
 fn button_name(index: usize) -> String {
@@ -416,32 +649,13 @@ fn resolve_capture_screen(
 fn capture_loop(
     target_fps: u32,
     region: Option<CaptureRegion>,
-    display_index: Option<usize>,
+    capture_screen: Screen,
     stop_signal: Arc<AtomicBool>,
     started_at: Instant,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
     click_events: Arc<Mutex<Vec<ClickEvent>>>,
 ) {
-    let screens = match Screen::all() {
-        Ok(all) => all,
-        Err(_) => return,
-    };
-
     let device_state = DeviceState::new();
-    let initial_mouse = device_state.get_mouse();
-    let preferred_point = region
-        .as_ref()
-        .map(|area| (area.x, area.y))
-        .unwrap_or(initial_mouse.coords);
-
-    let Some(capture_screen) = resolve_capture_screen(
-        &screens,
-        display_index,
-        preferred_point.0,
-        preferred_point.1,
-    ) else {
-        return;
-    };
 
     let mut frame_index: u64 = 0;
     let mut previous_buttons = vec![false; 8];
@@ -531,8 +745,24 @@ fn start_recording(
     });
 
     let target_fps = request.fps.unwrap_or(60).clamp(24, 60);
-    let region = request.region;
+    let region = request.region.clone();
     let display_index = request.display_index;
+    let screens = Screen::all().map_err(|err| format!("failed to enumerate displays: {err}"))?;
+    let device_state = DeviceState::new();
+    let initial_mouse = device_state.get_mouse();
+    let preferred_point = region
+        .as_ref()
+        .map(|area| (area.x, area.y))
+        .unwrap_or(initial_mouse.coords);
+
+    let capture_screen = resolve_capture_screen(
+        &screens,
+        display_index,
+        preferred_point.0,
+        preferred_point.1,
+    )
+    .ok_or_else(|| "failed to pick capture display".to_string())?;
+
     let stop_signal = Arc::new(AtomicBool::new(false));
     let started_at = Instant::now();
     let raw_frames = Arc::new(Mutex::new(Vec::new()));
@@ -545,7 +775,7 @@ fn start_recording(
         capture_loop(
             target_fps,
             region,
-            display_index,
+            capture_screen,
             thread_stop,
             started_at,
             thread_frames,
@@ -556,6 +786,12 @@ fn start_recording(
     recorder.is_recording = true;
     recorder.target_fps = target_fps;
     recorder.started_at = Some(started_at);
+    recorder.last_session_duration_ms = 0;
+    recorder.session_capture = Some(SessionCaptureConfig {
+        display_origin_x: capture_screen.display_info.x,
+        display_origin_y: capture_screen.display_info.y,
+        region: request.region,
+    });
     recorder.stop_signal = Some(stop_signal);
     recorder.handle = Some(handle);
     recorder.raw_frames = raw_frames;
@@ -872,7 +1108,20 @@ fn export_recording(
     let height = frames_guard[0].height;
     let fps = recorder.target_fps.max(1);
     let session_duration_ms = recorder.last_session_duration_ms;
-    let export_frame_indices = build_export_frame_indices(&frames_guard, fps, session_duration_ms);
+    let export_frame_samples = build_export_frame_samples(&frames_guard, fps, session_duration_ms);
+    let session_capture = recorder
+        .session_capture
+        .clone()
+        .ok_or_else(|| "missing session capture metadata".to_string())?;
+
+    let click_events_local: Vec<(u128, i32, i32)> = click_events
+        .iter()
+        .map(|click| {
+            let (local_x, local_y) =
+                global_to_frame_coords(click.cursor_x, click.cursor_y, &session_capture);
+            (click.timestamp_ms, local_x, local_y)
+        })
+        .collect();
 
     let mut child = Command::new("ffmpeg")
         .arg("-y")
@@ -908,23 +1157,75 @@ fn export_recording(
         .take()
         .ok_or_else(|| "failed to open ffmpeg stdin".to_string())?;
 
-    for source_index in &export_frame_indices {
-        let frame = &frames_guard[*source_index];
-        let (zoom, focus_x, focus_y) = best_zoom_and_focus(
-            frame.timestamp_ms,
-            frame.cursor_x,
-            frame.cursor_y,
+    for sample in &export_frame_samples {
+        let left_frame = &frames_guard[sample.left_index];
+        let right_frame = &frames_guard[sample.right_index];
+
+        let blended_cursor_x = (left_frame.cursor_x as f32 * (1.0 - sample.blend)
+            + right_frame.cursor_x as f32 * sample.blend)
+            .round() as i32;
+        let blended_cursor_y = (left_frame.cursor_y as f32 * (1.0 - sample.blend)
+            + right_frame.cursor_y as f32 * sample.blend)
+            .round() as i32;
+
+        let source_pixels = blend_frames_rgba(&left_frame.pixels_rgba, &right_frame.pixels_rgba, sample.blend);
+
+        let (zoom, focus_x_global, focus_y_global) = best_zoom_and_focus(
+            sample.timestamp_ms,
+            blended_cursor_x,
+            blended_cursor_y,
             &click_events,
             &profile,
         );
 
-        let transformed = apply_zoom_transform_rgba(
-            &frame.pixels_rgba,
-            frame.width,
-            frame.height,
+        let (focus_x_local, focus_y_local) =
+            global_to_frame_coords(focus_x_global, focus_y_global, &session_capture);
+        let (cursor_x_local, cursor_y_local) =
+            global_to_frame_coords(blended_cursor_x, blended_cursor_y, &session_capture);
+
+        let mut transformed = apply_zoom_transform_rgba(
+            &source_pixels,
+            left_frame.width,
+            left_frame.height,
             zoom,
-            focus_x,
-            focus_y,
+            focus_x_local,
+            focus_y_local,
+        );
+
+        let (cursor_mapped_x, cursor_mapped_y) = map_point_through_zoom(
+            left_frame.width,
+            left_frame.height,
+            zoom,
+            focus_x_local,
+            focus_y_local,
+            cursor_x_local,
+            cursor_y_local,
+        );
+
+        let mapped_clicks: Vec<(u128, i32, i32)> = click_events_local
+            .iter()
+            .map(|(time, x, y)| {
+                let (mx, my) = map_point_through_zoom(
+                    left_frame.width,
+                    left_frame.height,
+                    zoom,
+                    focus_x_local,
+                    focus_y_local,
+                    *x,
+                    *y,
+                );
+                (*time, mx, my)
+            })
+            .collect();
+
+        draw_cursor_overlay_rgba(
+            &mut transformed,
+            left_frame.width,
+            left_frame.height,
+            cursor_mapped_x,
+            cursor_mapped_y,
+            sample.timestamp_ms,
+            &mapped_clicks,
         );
 
         stdin
@@ -943,11 +1244,11 @@ fn export_recording(
 
     Ok(ExportRecordingResponse {
         output_path: output_path.to_string_lossy().to_string(),
-        frames_exported: export_frame_indices.len(),
+        frames_exported: export_frame_samples.len(),
         width: 1920,
         height: 1080,
         target_fps: fps,
-        output_duration_ms: ((export_frame_indices.len().saturating_sub(1) as u128) * 1000)
+        output_duration_ms: ((export_frame_samples.len().saturating_sub(1) as u128) * 1000)
             / fps as u128,
     })
 }
