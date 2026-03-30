@@ -67,6 +67,18 @@ type ExportRecordingResponse = {
   targetFps: number;
 };
 
+type DisplayDescriptor = {
+  index: number;
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  isPrimary: boolean;
+  scaleFactor: number;
+  frequency: number;
+};
+
 function App() {
   const [recording, setRecording] = useState(false);
   const [status, setStatus] = useState<RecordingStatus>({
@@ -80,6 +92,8 @@ function App() {
   const [gpuStatus, setGpuStatus] = useState<GpuInitStatus | null>(null);
   const [zoomPreview, setZoomPreview] = useState<ZoomPreviewResponse | null>(null);
   const [lastExport, setLastExport] = useState<ExportRecordingResponse | null>(null);
+  const [displays, setDisplays] = useState<DisplayDescriptor[]>([]);
+  const [displaySelection, setDisplaySelection] = useState("auto");
   const [message, setMessage] = useState("Ready for capture.");
   const [fps, setFps] = useState(60);
   const [regionEnabled, setRegionEnabled] = useState(false);
@@ -96,6 +110,8 @@ function App() {
   );
 
   useEffect(() => {
+    void loadDisplays();
+
     const timer = window.setInterval(async () => {
       try {
         const nextStatus = await invoke<RecordingStatus>("get_recording_status");
@@ -109,11 +125,21 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  async function loadDisplays() {
+    try {
+      const availableDisplays = await invoke<DisplayDescriptor[]>("list_displays");
+      setDisplays(availableDisplays);
+    } catch {
+      setDisplays([]);
+    }
+  }
+
   async function startRecording() {
     try {
       const request = {
         fps,
         region: regionEnabled ? region : null,
+        displayIndex: displaySelection === "auto" ? null : Number(displaySelection),
       };
       const nextStatus = await invoke<RecordingStatus>("start_recording", {
         request,
@@ -193,13 +219,28 @@ function App() {
   return (
     <main className="app-shell">
       <section className="hero-card">
-        <p className="eyebrow">SmoothShot v0.1.0 foundation</p>
-        <h1>Cinematic Screen Capture Controls</h1>
+        <p className="eyebrow">SmoothShot Studio</p>
+        <h1>Screen Recording Workspace</h1>
         <p className="status-line">{message}</p>
       </section>
 
       <section className="control-card">
         <div className="control-grid">
+          <label>
+            Display
+            <select
+              value={displaySelection}
+              onChange={(event) => setDisplaySelection(event.currentTarget.value)}
+              disabled={recording}
+            >
+              <option value="auto">Auto (cursor monitor at start)</option>
+              {displays.map((display) => (
+                <option key={display.id} value={display.index}>
+                  {display.isPrimary ? "Primary" : `Display ${display.index + 1}`} - {display.width}x{display.height} @ ({display.x},{display.y})
+                </option>
+              ))}
+            </select>
+          </label>
           <label>
             Target FPS
             <input
@@ -272,6 +313,9 @@ function App() {
           </button>
           <button type="button" onClick={stopRecording} disabled={!recording}>
             Stop Recording
+          </button>
+          <button type="button" onClick={loadDisplays} disabled={recording}>
+            Refresh Displays
           </button>
           <button type="button" onClick={exportRecording} disabled={recording}>
             Export
@@ -358,7 +402,7 @@ function App() {
         {!lastExport && <p>No export created yet.</p>}
         {lastExport && (
           <ul>
-            <li>Path: {lastExport.outputPath}</li>
+            <li>Path: <span className="path-chip">{lastExport.outputPath}</span></li>
             <li>Frames: {lastExport.framesExported.toLocaleString()}</li>
             <li>Video: {lastExport.width}x{lastExport.height}</li>
             <li>FPS target: {lastExport.targetFps}</li>
