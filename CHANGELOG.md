@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog and this project follows Semantic Versioning while in pre-1.0 milestones.
 
+## [Unreleased]
+### Added
+- v0.2 backend command to initialize a wgpu adapter for GPU rendering path readiness.
+- v0.2 cinematic auto-zoom timeline engine with ease-in-out profile generation from click events.
+- v0.2 UI controls for GPU initialization and zoom preview inspection.
+
 ## [0.1.0] - 2026-03-31
 ### Added
 - Bootstrapped Tauri v2 + React + TypeScript project using pnpm.
