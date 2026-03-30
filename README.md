@@ -20,7 +20,7 @@ Development is intentionally staged. Each version is released as a candidate and
 - v0.3.0: FFmpeg MP4 (H.264, 1080p) export
 - v0.4.0: stabilization and optional preview
 
-## Current Version: v0.1.0 released, v0.2.0 in progress
+## Current Version: v0.1.0 released, v0.2/v0.3 in progress on develop
 
 Implemented in this milestone:
 
@@ -41,6 +41,12 @@ Deferred by design:
 - wgpu adapter initialization command is available.
 - Cinematic zoom timeline preview generation is available using click events and easing.
 - UI includes "Init GPU" and "Build Zoom Preview" controls for quick verification.
+
+## v0.3 In-Progress on develop
+
+- FFmpeg export command produces MP4 (H.264) output.
+- Export scales output to 1080p and applies click-driven zoom transform before encoding.
+- UI displays export file path, frame count, and output format metadata.
 
 ## Run Locally
 

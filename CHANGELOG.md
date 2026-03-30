@@ -9,6 +9,9 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - v0.2 backend command to initialize a wgpu adapter for GPU rendering path readiness.
 - v0.2 cinematic auto-zoom timeline engine with ease-in-out profile generation from click events.
 - v0.2 UI controls for GPU initialization and zoom preview inspection.
+- v0.3 backend MP4 export implementation using FFmpeg with H.264 encoding and 1080p scaling.
+- v0.3 export path now applies click-driven zoom transforms before encoding.
+- v0.3 UI now displays export path and output metadata after completion.
 
 ## [0.1.0] - 2026-03-31
 ### Added
