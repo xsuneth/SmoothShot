@@ -130,6 +130,7 @@ struct ExportRecordingResponse {
     width: u32,
     height: u32,
     target_fps: u32,
+    output_duration_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +173,7 @@ struct RecorderInner {
     is_recording: bool,
     target_fps: u32,
     started_at: Option<Instant>,
+    last_session_duration_ms: u128,
     stop_signal: Option<Arc<AtomicBool>>,
     handle: Option<JoinHandle<()>>,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
@@ -347,17 +349,22 @@ fn apply_zoom_transform_rgba(
     output
 }
 
-fn build_export_frame_indices(frames: &[RawFrame], target_fps: u32) -> Vec<usize> {
+fn build_export_frame_indices(
+    frames: &[RawFrame],
+    target_fps: u32,
+    total_duration_ms: u128,
+) -> Vec<usize> {
     if frames.is_empty() {
         return Vec::new();
     }
 
     let interval_ms = 1000.0_f64 / target_fps.max(1) as f64;
-    let last_timestamp_ms = frames
+    let last_frame_timestamp_ms = frames
         .last()
         .map(|frame| frame.timestamp_ms as f64)
         .unwrap_or_default();
-    let output_len = ((last_timestamp_ms / interval_ms).floor() as usize).saturating_add(1);
+    let effective_duration_ms = total_duration_ms.max(last_frame_timestamp_ms as u128) as f64;
+    let output_len = ((effective_duration_ms / interval_ms).floor() as usize).saturating_add(1);
 
     let mut indices = Vec::with_capacity(output_len.max(frames.len()));
     let mut source_idx = 0usize;
@@ -587,6 +594,7 @@ fn stop_recording(state: tauri::State<'_, AppState>) -> Result<StopRecordingResp
         .started_at
         .map(|start| start.elapsed().as_millis())
         .unwrap_or_default();
+    recorder.last_session_duration_ms = duration_ms;
 
     let frames_captured = recorder
         .raw_frames
@@ -863,7 +871,8 @@ fn export_recording(
     let width = frames_guard[0].width;
     let height = frames_guard[0].height;
     let fps = recorder.target_fps.max(1);
-    let export_frame_indices = build_export_frame_indices(&frames_guard, fps);
+    let session_duration_ms = recorder.last_session_duration_ms;
+    let export_frame_indices = build_export_frame_indices(&frames_guard, fps, session_duration_ms);
 
     let mut child = Command::new("ffmpeg")
         .arg("-y")
@@ -938,6 +947,8 @@ fn export_recording(
         width: 1920,
         height: 1080,
         target_fps: fps,
+        output_duration_ms: ((export_frame_indices.len().saturating_sub(1) as u128) * 1000)
+            / fps as u128,
     })
 }
 
