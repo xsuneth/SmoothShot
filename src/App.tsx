@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 type CaptureRegion = {
@@ -65,6 +66,7 @@ type ExportRecordingResponse = {
   width: number;
   height: number;
   targetFps: number;
+  outputDurationMs: number;
 };
 
 type DisplayDescriptor = {
@@ -92,6 +94,7 @@ function App() {
   const [gpuStatus, setGpuStatus] = useState<GpuInitStatus | null>(null);
   const [zoomPreview, setZoomPreview] = useState<ZoomPreviewResponse | null>(null);
   const [lastExport, setLastExport] = useState<ExportRecordingResponse | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [displays, setDisplays] = useState<DisplayDescriptor[]>([]);
   const [displaySelection, setDisplaySelection] = useState("auto");
   const [message, setMessage] = useState("Ready for capture.");
@@ -180,9 +183,35 @@ function App() {
         },
       });
       setLastExport(exportResult);
+      setPreviewUrl(toLocalFileUrl(exportResult.outputPath));
       setMessage(`Export completed: ${exportResult.outputPath}`);
     } catch (error) {
       setMessage(String(error));
+    }
+  }
+
+  function toLocalFileUrl(path: string) {
+    const normalized = path.replace(/\\/g, "/");
+    if (/^[A-Za-z]:\//.test(normalized)) {
+      return `file:///${normalized}`;
+    }
+
+    if (normalized.startsWith("/")) {
+      return `file://${normalized}`;
+    }
+
+    return normalized;
+  }
+
+  async function openExportedFile() {
+    if (!lastExport) {
+      return;
+    }
+
+    try {
+      await openPath(lastExport.outputPath);
+    } catch (error) {
+      setMessage(`Could not open exported file: ${String(error)}`);
     }
   }
 
@@ -401,13 +430,25 @@ function App() {
         <h2>Export Output (v0.3)</h2>
         {!lastExport && <p>No export created yet.</p>}
         {lastExport && (
-          <ul>
-            <li>Path: <span className="path-chip">{lastExport.outputPath}</span></li>
-            <li>Frames: {lastExport.framesExported.toLocaleString()}</li>
-            <li>Video: {lastExport.width}x{lastExport.height}</li>
-            <li>FPS target: {lastExport.targetFps}</li>
-          </ul>
+          <>
+            <ul>
+              <li>Path: <span className="path-chip">{lastExport.outputPath}</span></li>
+              <li>Frames: {lastExport.framesExported.toLocaleString()}</li>
+              <li>Video: {lastExport.width}x{lastExport.height}</li>
+              <li>FPS target: {lastExport.targetFps}</li>
+              <li>Duration: {(lastExport.outputDurationMs / 1000).toFixed(2)}s</li>
+            </ul>
+            <div className="button-row">
+              <button type="button" onClick={openExportedFile}>Open Exported File</button>
+            </div>
+          </>
         )}
+      </section>
+
+      <section className="timeline-card">
+        <h2>Basic Preview (v0.4)</h2>
+        {!previewUrl && <p>No preview available yet. Export once to preview.</p>}
+        {previewUrl && <video className="preview-player" src={previewUrl} controls preload="metadata" />}
       </section>
     </main>
   );
