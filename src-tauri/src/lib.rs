@@ -2,9 +2,14 @@ use device_query::{DeviceQuery, DeviceState};
 use pollster::block_on;
 use screenshots::Screen;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +95,26 @@ struct GpuInitStatus {
     initialized: bool,
     adapter_name: Option<String>,
     backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportRecordingRequest {
+    output_path: Option<String>,
+    max_zoom: Option<f32>,
+    zoom_in_ms: Option<u128>,
+    hold_ms: Option<u128>,
+    zoom_out_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportRecordingResponse {
+    output_path: String,
+    frames_exported: usize,
+    width: u32,
+    height: u32,
+    target_fps: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,6 +265,71 @@ fn build_frame_metadata(
     }
 
     Ok(items)
+}
+
+fn best_zoom_and_focus(
+    frame_timestamp_ms: u128,
+    fallback_x: i32,
+    fallback_y: i32,
+    click_events: &[ClickEvent],
+    profile: &ZoomProfile,
+) -> (f32, i32, i32) {
+    let mut best_zoom = 1.0_f32;
+    let mut focus_x = fallback_x;
+    let mut focus_y = fallback_y;
+
+    for click in click_events {
+        if let Some(zoom) = zoom_from_click(frame_timestamp_ms, click.timestamp_ms, profile) {
+            if zoom > best_zoom {
+                best_zoom = zoom;
+                focus_x = click.cursor_x;
+                focus_y = click.cursor_y;
+            }
+        }
+    }
+
+    (best_zoom, focus_x, focus_y)
+}
+
+fn apply_zoom_transform_rgba(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    zoom: f32,
+    focus_x: i32,
+    focus_y: i32,
+) -> Vec<u8> {
+    if zoom <= 1.001 {
+        return source.to_vec();
+    }
+
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let crop_w = ((width as f32) / zoom).round().max(1.0) as u32;
+    let crop_h = ((height as f32) / zoom).round().max(1.0) as u32;
+
+    let max_x0 = width.saturating_sub(crop_w) as i32;
+    let max_y0 = height.saturating_sub(crop_h) as i32;
+    let x0 = (focus_x - (crop_w as i32 / 2)).clamp(0, max_x0) as u32;
+    let y0 = (focus_y - (crop_h as i32 / 2)).clamp(0, max_y0) as u32;
+
+    let mut output = vec![0_u8; source.len()];
+
+    for y in 0..height_usize {
+        for x in 0..width_usize {
+            let sx = x0 + (((x as f32) / (width as f32)) * crop_w as f32).floor() as u32;
+            let sy = y0 + (((y as f32) / (height as f32)) * crop_h as f32).floor() as u32;
+
+            let sx = sx.min(width.saturating_sub(1));
+            let sy = sy.min(height.saturating_sub(1));
+
+            let src_offset = ((sy as usize * width_usize) + sx as usize) * 4;
+            let dst_offset = ((y * width_usize) + x) * 4;
+            output[dst_offset..dst_offset + 4].copy_from_slice(&source[src_offset..src_offset + 4]);
+        }
+    }
+
+    output
 }
 
 fn button_name(index: usize) -> String {
@@ -598,8 +688,153 @@ fn build_zoom_preview(
 }
 
 #[tauri::command]
-fn export_recording() -> Result<String, String> {
-    Err("Export pipeline is scheduled for v0.3.0 (FFmpeg integration).".to_string())
+fn export_recording(
+    state: tauri::State<'_, AppState>,
+    request: Option<ExportRecordingRequest>,
+) -> Result<ExportRecordingResponse, String> {
+    let recorder = state
+        .recorder
+        .lock()
+        .map_err(|_| "failed to lock recorder state".to_string())?;
+
+    if recorder.is_recording {
+        return Err("stop recording before export".to_string());
+    }
+
+    let request = request.unwrap_or(ExportRecordingRequest {
+        output_path: None,
+        max_zoom: None,
+        zoom_in_ms: None,
+        hold_ms: None,
+        zoom_out_ms: None,
+    });
+
+    let mut check = Command::new("ffmpeg");
+    check.arg("-version");
+    let check_result = check
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if check_result.is_err() {
+        return Err("ffmpeg was not found in PATH".to_string());
+    }
+
+    let output_path = if let Some(path) = request.output_path {
+        PathBuf::from(path)
+    } else {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "failed to read system time".to_string())?
+            .as_secs();
+        let mut path = PathBuf::from("exports");
+        path.push(format!("smoothshot-{epoch}.mp4"));
+        path
+    };
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("failed to create output directory: {err}"))?;
+    }
+
+    let profile = ZoomProfile {
+        zoom_in_ms: request.zoom_in_ms.unwrap_or(180),
+        hold_ms: request.hold_ms.unwrap_or(120),
+        zoom_out_ms: request.zoom_out_ms.unwrap_or(260),
+        max_zoom: request.max_zoom.unwrap_or(1.85).clamp(1.05, 3.0),
+        easing: "ease-in-out-sine".to_string(),
+    };
+
+    let click_events = recorder
+        .click_events
+        .lock()
+        .map_err(|_| "failed to lock click events".to_string())?
+        .clone();
+
+    let frames_guard = recorder
+        .raw_frames
+        .lock()
+        .map_err(|_| "failed to lock frame buffer".to_string())?;
+
+    if frames_guard.is_empty() {
+        return Err("no captured frames available to export".to_string());
+    }
+
+    let width = frames_guard[0].width;
+    let height = frames_guard[0].height;
+    let fps = recorder.target_fps.max(1);
+
+    let mut child = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pixel_format")
+        .arg("rgba")
+        .arg("-video_size")
+        .arg(format!("{width}x{height}"))
+        .arg("-framerate")
+        .arg(fps.to_string())
+        .arg("-i")
+        .arg("-")
+        .arg("-vf")
+        .arg("scale=1920:1080:flags=lanczos")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-preset")
+        .arg("veryfast")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(output_path.to_string_lossy().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to start ffmpeg: {err}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to open ffmpeg stdin".to_string())?;
+
+    for frame in frames_guard.iter() {
+        let (zoom, focus_x, focus_y) = best_zoom_and_focus(
+            frame.timestamp_ms,
+            frame.cursor_x,
+            frame.cursor_y,
+            &click_events,
+            &profile,
+        );
+
+        let transformed = apply_zoom_transform_rgba(
+            &frame.pixels_rgba,
+            frame.width,
+            frame.height,
+            zoom,
+            focus_x,
+            focus_y,
+        );
+
+        stdin
+            .write_all(&transformed)
+            .map_err(|err| format!("failed while streaming frames to ffmpeg: {err}"))?;
+    }
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for ffmpeg: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("ffmpeg export failed: {stderr}"));
+    }
+
+    Ok(ExportRecordingResponse {
+        output_path: output_path.to_string_lossy().to_string(),
+        frames_exported: frames_guard.len(),
+        width: 1920,
+        height: 1080,
+        target_fps: fps,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
