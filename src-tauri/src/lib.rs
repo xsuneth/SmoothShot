@@ -1,4 +1,5 @@
 use device_query::{DeviceQuery, DeviceState};
+use pollster::block_on;
 use screenshots::Screen;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,53 @@ struct ClickEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ZoomTransformFrame {
+    frame_index: u64,
+    timestamp_ms: u128,
+    zoom: f32,
+    focus_x: i32,
+    focus_y: i32,
+    click_driven: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ZoomProfile {
+    zoom_in_ms: u128,
+    hold_ms: u128,
+    zoom_out_ms: u128,
+    max_zoom: f32,
+    easing: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ZoomPreviewResponse {
+    frames: Vec<ZoomTransformFrame>,
+    click_count: usize,
+    profile: ZoomProfile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ZoomPreviewRequest {
+    limit: Option<usize>,
+    zoom_in_ms: Option<u128>,
+    hold_ms: Option<u128>,
+    zoom_out_ms: Option<u128>,
+    max_zoom: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuInitStatus {
+    initialized: bool,
+    adapter_name: Option<String>,
+    backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RecordingStatus {
     is_recording: bool,
     target_fps: u32,
@@ -73,6 +121,13 @@ struct RawFrame {
 }
 
 #[derive(Debug, Default)]
+struct GpuRendererState {
+    initialized: bool,
+    adapter_name: Option<String>,
+    backend: Option<String>,
+}
+
+#[derive(Debug, Default)]
 struct RecorderInner {
     is_recording: bool,
     target_fps: u32,
@@ -86,6 +141,105 @@ struct RecorderInner {
 #[derive(Default)]
 struct AppState {
     recorder: Mutex<RecorderInner>,
+    gpu_renderer: Mutex<GpuRendererState>,
+}
+
+fn backend_name(backend: wgpu::Backend) -> String {
+    match backend {
+        wgpu::Backend::Vulkan => "vulkan".to_string(),
+        wgpu::Backend::Metal => "metal".to_string(),
+        wgpu::Backend::Dx12 => "dx12".to_string(),
+        wgpu::Backend::Gl => "opengl".to_string(),
+        wgpu::Backend::BrowserWebGpu => "webgpu".to_string(),
+        wgpu::Backend::Noop => "noop".to_string(),
+    }
+}
+
+fn ease_in_out_sine(progress: f32) -> f32 {
+    -((std::f32::consts::PI * progress).cos() - 1.0) / 2.0
+}
+
+fn zoom_from_click(
+    frame_timestamp_ms: u128,
+    click_timestamp_ms: u128,
+    profile: &ZoomProfile,
+) -> Option<f32> {
+    let zoom_in_end = click_timestamp_ms + profile.zoom_in_ms;
+    let hold_end = zoom_in_end + profile.hold_ms;
+    let zoom_out_end = hold_end + profile.zoom_out_ms;
+
+    if frame_timestamp_ms < click_timestamp_ms || frame_timestamp_ms > zoom_out_end {
+        return None;
+    }
+
+    let min_zoom = 1.0_f32;
+    let zoom_span = profile.max_zoom - min_zoom;
+
+    if frame_timestamp_ms <= zoom_in_end {
+        let in_progress =
+            (frame_timestamp_ms - click_timestamp_ms) as f32 / profile.zoom_in_ms.max(1) as f32;
+        return Some(min_zoom + zoom_span * ease_in_out_sine(in_progress.clamp(0.0, 1.0)));
+    }
+
+    if frame_timestamp_ms <= hold_end {
+        return Some(profile.max_zoom);
+    }
+
+    let out_progress =
+        (frame_timestamp_ms - hold_end) as f32 / profile.zoom_out_ms.max(1) as f32;
+    Some(profile.max_zoom - zoom_span * ease_in_out_sine(out_progress.clamp(0.0, 1.0)))
+}
+
+fn build_frame_metadata(
+    recorder: &RecorderInner,
+    limit: usize,
+) -> Result<Vec<FrameMetadata>, String> {
+    let frames = recorder
+        .raw_frames
+        .lock()
+        .map_err(|_| "failed to lock frame buffer".to_string())?;
+
+    let clicks = recorder
+        .click_events
+        .lock()
+        .map_err(|_| "failed to lock click events".to_string())?;
+
+    let max_items = limit.clamp(1, 5_000);
+    let start_index = frames.len().saturating_sub(max_items);
+    let selected = &frames[start_index..];
+
+    let mut click_cursor = 0usize;
+    let mut items = Vec::with_capacity(selected.len());
+    let frame_gap_fallback = (1000_u128 / recorder.target_fps.max(1) as u128).max(1);
+
+    for (index, frame) in selected.iter().enumerate() {
+        let next_timestamp = selected
+            .get(index + 1)
+            .map(|next| next.timestamp_ms)
+            .unwrap_or(frame.timestamp_ms + frame_gap_fallback);
+
+        while click_cursor < clicks.len() && clicks[click_cursor].timestamp_ms < frame.timestamp_ms {
+            click_cursor += 1;
+        }
+
+        let click_in_frame = clicks
+            .get(click_cursor)
+            .map(|click| click.timestamp_ms >= frame.timestamp_ms && click.timestamp_ms < next_timestamp)
+            .unwrap_or(false);
+
+        items.push(FrameMetadata {
+            frame_index: (start_index + index) as u64,
+            timestamp_ms: frame.timestamp_ms,
+            width: frame.width,
+            height: frame.height,
+            raw_bytes: frame.pixels_rgba.len(),
+            cursor_x: frame.cursor_x,
+            cursor_y: frame.cursor_y,
+            click_in_frame,
+        });
+    }
+
+    Ok(items)
 }
 
 fn button_name(index: usize) -> String {
@@ -335,28 +489,112 @@ fn get_frame_timeline(
         .lock()
         .map_err(|_| "failed to lock recorder state".to_string())?;
 
-    let frames = recorder
-        .raw_frames
+    build_frame_metadata(&recorder, limit.unwrap_or(300))
+}
+
+#[tauri::command]
+fn initialize_gpu_renderer(state: tauri::State<'_, AppState>) -> Result<GpuInitStatus, String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+
+    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }))
+    .map_err(|err| format!("failed to find GPU adapter: {err}"))?;
+
+    let info = adapter.get_info();
+    let mut gpu_renderer = state
+        .gpu_renderer
         .lock()
-        .map_err(|_| "failed to lock frame buffer".to_string())?;
+        .map_err(|_| "failed to lock gpu renderer state".to_string())?;
 
-    let max_items = limit.unwrap_or(300).clamp(1, 5_000);
-    let start_index = frames.len().saturating_sub(max_items);
+    gpu_renderer.initialized = true;
+    gpu_renderer.adapter_name = Some(info.name.clone());
+    gpu_renderer.backend = Some(backend_name(info.backend));
 
-    Ok(frames[start_index..]
-        .iter()
-        .enumerate()
-        .map(|(index, frame)| FrameMetadata {
-            frame_index: (start_index + index) as u64,
+    Ok(GpuInitStatus {
+        initialized: gpu_renderer.initialized,
+        adapter_name: gpu_renderer.adapter_name.clone(),
+        backend: gpu_renderer.backend.clone(),
+    })
+}
+
+#[tauri::command]
+fn build_zoom_preview(
+    state: tauri::State<'_, AppState>,
+    request: Option<ZoomPreviewRequest>,
+) -> Result<ZoomPreviewResponse, String> {
+    let recorder = state
+        .recorder
+        .lock()
+        .map_err(|_| "failed to lock recorder state".to_string())?;
+
+    if recorder.is_recording {
+        return Err("stop recording before generating zoom preview".to_string());
+    }
+
+    let request = request.unwrap_or(ZoomPreviewRequest {
+        limit: None,
+        zoom_in_ms: None,
+        hold_ms: None,
+        zoom_out_ms: None,
+        max_zoom: None,
+    });
+
+    let profile = ZoomProfile {
+        zoom_in_ms: request.zoom_in_ms.unwrap_or(180),
+        hold_ms: request.hold_ms.unwrap_or(120),
+        zoom_out_ms: request.zoom_out_ms.unwrap_or(260),
+        max_zoom: request.max_zoom.unwrap_or(1.85).clamp(1.05, 3.0),
+        easing: "ease-in-out-sine".to_string(),
+    };
+
+    let frame_metadata = build_frame_metadata(&recorder, request.limit.unwrap_or(600))?;
+    if frame_metadata.is_empty() {
+        return Err("no captured frames available for preview".to_string());
+    }
+
+    let click_events = recorder
+        .click_events
+        .lock()
+        .map_err(|_| "failed to lock click events".to_string())?
+        .clone();
+
+    let mut transforms = Vec::with_capacity(frame_metadata.len());
+
+    for frame in &frame_metadata {
+        let mut best_zoom = 1.0_f32;
+        let mut focus_x = frame.cursor_x;
+        let mut focus_y = frame.cursor_y;
+        let mut click_driven = false;
+
+        for click in &click_events {
+            if let Some(zoom) = zoom_from_click(frame.timestamp_ms, click.timestamp_ms, &profile) {
+                if zoom > best_zoom {
+                    best_zoom = zoom;
+                    focus_x = click.cursor_x;
+                    focus_y = click.cursor_y;
+                    click_driven = true;
+                }
+            }
+        }
+
+        transforms.push(ZoomTransformFrame {
+            frame_index: frame.frame_index,
             timestamp_ms: frame.timestamp_ms,
-            width: frame.width,
-            height: frame.height,
-            raw_bytes: frame.pixels_rgba.len(),
-            cursor_x: frame.cursor_x,
-            cursor_y: frame.cursor_y,
-            click_in_frame: false,
-        })
-        .collect())
+            zoom: (best_zoom * 1000.0).round() / 1000.0,
+            focus_x,
+            focus_y,
+            click_driven,
+        });
+    }
+
+    Ok(ZoomPreviewResponse {
+        frames: transforms,
+        click_count: click_events.len(),
+        profile,
+    })
 }
 
 #[tauri::command]
@@ -375,6 +613,8 @@ pub fn run() {
             get_recording_status,
             get_click_timeline,
             get_frame_timeline,
+            initialize_gpu_renderer,
+            build_zoom_preview,
             export_recording
         ])
         .run(tauri::generate_context!())

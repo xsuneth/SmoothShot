@@ -24,4 +24,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 screenshots = "0.8"
 device_query = "2"
+wgpu = "25"
+pollster = "0.4"
 
