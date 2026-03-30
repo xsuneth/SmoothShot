@@ -30,6 +30,35 @@ type ClickEvent = {
   button: string;
 };
 
+type GpuInitStatus = {
+  initialized: boolean;
+  adapterName: string | null;
+  backend: string | null;
+};
+
+type ZoomProfile = {
+  zoomInMs: number;
+  holdMs: number;
+  zoomOutMs: number;
+  maxZoom: number;
+  easing: string;
+};
+
+type ZoomTransformFrame = {
+  frameIndex: number;
+  timestampMs: number;
+  zoom: number;
+  focusX: number;
+  focusY: number;
+  clickDriven: boolean;
+};
+
+type ZoomPreviewResponse = {
+  frames: ZoomTransformFrame[];
+  clickCount: number;
+  profile: ZoomProfile;
+};
+
 function App() {
   const [recording, setRecording] = useState(false);
   const [status, setStatus] = useState<RecordingStatus>({
@@ -40,6 +69,8 @@ function App() {
   });
   const [lastSession, setLastSession] = useState<StopRecordingResponse | null>(null);
   const [timeline, setTimeline] = useState<ClickEvent[]>([]);
+  const [gpuStatus, setGpuStatus] = useState<GpuInitStatus | null>(null);
+  const [zoomPreview, setZoomPreview] = useState<ZoomPreviewResponse | null>(null);
   const [message, setMessage] = useState("Ready for capture.");
   const [fps, setFps] = useState(60);
   const [regionEnabled, setRegionEnabled] = useState(false);
@@ -108,6 +139,36 @@ function App() {
       await invoke("export_recording");
     } catch (error) {
       setMessage(String(error));
+    }
+  }
+
+  async function initializeGpuRenderer() {
+    try {
+      const status = await invoke<GpuInitStatus>("initialize_gpu_renderer");
+      setGpuStatus(status);
+      setMessage(
+        `GPU renderer ready on ${status.backend ?? "unknown"} (${status.adapterName ?? "adapter"}).`,
+      );
+    } catch (error) {
+      setMessage(`Could not initialize GPU renderer: ${String(error)}`);
+    }
+  }
+
+  async function generateZoomPreview() {
+    try {
+      const preview = await invoke<ZoomPreviewResponse>("build_zoom_preview", {
+        request: {
+          limit: 420,
+          zoomInMs: 180,
+          holdMs: 120,
+          zoomOutMs: 260,
+          maxZoom: 1.85,
+        },
+      });
+      setZoomPreview(preview);
+      setMessage(`Zoom preview generated from ${preview.clickCount} click events.`);
+    } catch (error) {
+      setMessage(`Could not build zoom preview: ${String(error)}`);
     }
   }
 
@@ -197,6 +258,12 @@ function App() {
           <button type="button" onClick={exportRecording} disabled={recording}>
             Export
           </button>
+          <button type="button" onClick={initializeGpuRenderer}>
+            Init GPU
+          </button>
+          <button type="button" onClick={generateZoomPreview} disabled={recording}>
+            Build Zoom Preview
+          </button>
         </div>
       </section>
 
@@ -237,6 +304,34 @@ function App() {
             Last session: {lastSession.framesCaptured} frames in {lastSession.durationMs}ms, {" "}
             {lastSession.clicksDetected} clicks.
           </p>
+        )}
+      </section>
+
+      <section className="timeline-card">
+        <h2>Auto Zoom Preview (v0.2)</h2>
+        {!gpuStatus && <p>GPU renderer not initialized yet.</p>}
+        {gpuStatus && (
+          <p>
+            GPU: {gpuStatus.adapterName ?? "Unknown adapter"} ({gpuStatus.backend ?? "unknown"})
+          </p>
+        )}
+        {!zoomPreview && <p>No preview generated yet.</p>}
+        {zoomPreview && (
+          <>
+            <p>
+              Profile: {zoomPreview.profile.easing}, in {zoomPreview.profile.zoomInMs}ms, hold {" "}
+              {zoomPreview.profile.holdMs}ms, out {zoomPreview.profile.zoomOutMs}ms, max {" "}
+              {zoomPreview.profile.maxZoom.toFixed(2)}x
+            </p>
+            <ul>
+              {zoomPreview.frames.slice(0, 8).map((frame) => (
+                <li key={frame.frameIndex}>
+                  frame {frame.frameIndex} | t={frame.timestampMs}ms | zoom {frame.zoom.toFixed(2)}x | focus ({frame.focusX}, {frame.focusY})
+                  {frame.clickDriven ? " | click" : ""}
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </section>
     </main>
