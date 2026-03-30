@@ -59,6 +59,14 @@ type ZoomPreviewResponse = {
   profile: ZoomProfile;
 };
 
+type ExportRecordingResponse = {
+  outputPath: string;
+  framesExported: number;
+  width: number;
+  height: number;
+  targetFps: number;
+};
+
 function App() {
   const [recording, setRecording] = useState(false);
   const [status, setStatus] = useState<RecordingStatus>({
@@ -71,6 +79,7 @@ function App() {
   const [timeline, setTimeline] = useState<ClickEvent[]>([]);
   const [gpuStatus, setGpuStatus] = useState<GpuInitStatus | null>(null);
   const [zoomPreview, setZoomPreview] = useState<ZoomPreviewResponse | null>(null);
+  const [lastExport, setLastExport] = useState<ExportRecordingResponse | null>(null);
   const [message, setMessage] = useState("Ready for capture.");
   const [fps, setFps] = useState(60);
   const [regionEnabled, setRegionEnabled] = useState(false);
@@ -136,7 +145,16 @@ function App() {
 
   async function exportRecording() {
     try {
-      await invoke("export_recording");
+      const exportResult = await invoke<ExportRecordingResponse>("export_recording", {
+        request: {
+          maxZoom: 1.85,
+          zoomInMs: 180,
+          holdMs: 120,
+          zoomOutMs: 260,
+        },
+      });
+      setLastExport(exportResult);
+      setMessage(`Export completed: ${exportResult.outputPath}`);
     } catch (error) {
       setMessage(String(error));
     }
@@ -332,6 +350,19 @@ function App() {
               ))}
             </ul>
           </>
+        )}
+      </section>
+
+      <section className="timeline-card">
+        <h2>Export Output (v0.3)</h2>
+        {!lastExport && <p>No export created yet.</p>}
+        {lastExport && (
+          <ul>
+            <li>Path: {lastExport.outputPath}</li>
+            <li>Frames: {lastExport.framesExported.toLocaleString()}</li>
+            <li>Video: {lastExport.width}x{lastExport.height}</li>
+            <li>FPS target: {lastExport.targetFps}</li>
+          </ul>
         )}
       </section>
     </main>
