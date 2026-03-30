@@ -26,6 +26,7 @@ struct CaptureRegion {
 struct StartRecordingRequest {
     fps: Option<u32>,
     region: Option<CaptureRegion>,
+    display_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +96,20 @@ struct GpuInitStatus {
     initialized: bool,
     adapter_name: Option<String>,
     backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayDescriptor {
+    index: usize,
+    id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    is_primary: bool,
+    scale_factor: f32,
+    frequency: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -341,9 +356,28 @@ fn button_name(index: usize) -> String {
     }
 }
 
+fn resolve_capture_screen(
+    screens: &[Screen],
+    display_index: Option<usize>,
+    fallback_x: i32,
+    fallback_y: i32,
+) -> Option<Screen> {
+    if let Some(index) = display_index {
+        if let Some(screen) = screens.get(index) {
+            return Some(*screen);
+        }
+    }
+
+    Screen::from_point(fallback_x, fallback_y)
+        .ok()
+        .or_else(|| screens.iter().find(|screen| screen.display_info.is_primary).copied())
+        .or_else(|| screens.first().copied())
+}
+
 fn capture_loop(
     target_fps: u32,
     region: Option<CaptureRegion>,
+    display_index: Option<usize>,
     stop_signal: Arc<AtomicBool>,
     started_at: Instant,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
@@ -354,11 +388,22 @@ fn capture_loop(
         Err(_) => return,
     };
 
-    let Some(primary_screen) = screens.first() else {
+    let device_state = DeviceState::new();
+    let initial_mouse = device_state.get_mouse();
+    let preferred_point = region
+        .as_ref()
+        .map(|area| (area.x, area.y))
+        .unwrap_or(initial_mouse.coords);
+
+    let Some(capture_screen) = resolve_capture_screen(
+        &screens,
+        display_index,
+        preferred_point.0,
+        preferred_point.1,
+    ) else {
         return;
     };
 
-    let device_state = DeviceState::new();
     let mut frame_index: u64 = 0;
     let mut previous_buttons = vec![false; 8];
     let target_frame_time = Duration::from_secs_f64(1.0 / target_fps as f64);
@@ -368,14 +413,16 @@ fn capture_loop(
         let mouse = device_state.get_mouse();
 
         let capture_result = if let Some(active_region) = &region {
-            primary_screen.capture_area(
-                active_region.x,
-                active_region.y,
+            let local_x = active_region.x - capture_screen.display_info.x;
+            let local_y = active_region.y - capture_screen.display_info.y;
+            capture_screen.capture_area(
+                local_x,
+                local_y,
                 active_region.width,
                 active_region.height,
             )
         } else {
-            primary_screen.capture()
+            capture_screen.capture()
         };
 
         if let Ok(image) = capture_result {
@@ -438,13 +485,15 @@ fn start_recording(
         return Err("recording is already running".to_string());
     }
 
-    let target_fps = request
-        .as_ref()
-        .and_then(|value| value.fps)
-        .unwrap_or(60)
-        .clamp(24, 60);
+    let request = request.unwrap_or(StartRecordingRequest {
+        fps: None,
+        region: None,
+        display_index: None,
+    });
 
-    let region = request.and_then(|value| value.region);
+    let target_fps = request.fps.unwrap_or(60).clamp(24, 60);
+    let region = request.region;
+    let display_index = request.display_index;
     let stop_signal = Arc::new(AtomicBool::new(false));
     let started_at = Instant::now();
     let raw_frames = Arc::new(Mutex::new(Vec::new()));
@@ -457,6 +506,7 @@ fn start_recording(
         capture_loop(
             target_fps,
             region,
+            display_index,
             thread_stop,
             started_at,
             thread_frames,
@@ -608,6 +658,26 @@ fn initialize_gpu_renderer(state: tauri::State<'_, AppState>) -> Result<GpuInitS
         adapter_name: gpu_renderer.adapter_name.clone(),
         backend: gpu_renderer.backend.clone(),
     })
+}
+
+#[tauri::command]
+fn list_displays() -> Result<Vec<DisplayDescriptor>, String> {
+    let screens = Screen::all().map_err(|err| format!("failed to enumerate displays: {err}"))?;
+    Ok(screens
+        .iter()
+        .enumerate()
+        .map(|(index, screen)| DisplayDescriptor {
+            index,
+            id: screen.display_info.id,
+            x: screen.display_info.x,
+            y: screen.display_info.y,
+            width: screen.display_info.width,
+            height: screen.display_info.height,
+            is_primary: screen.display_info.is_primary,
+            scale_factor: screen.display_info.scale_factor,
+            frequency: screen.display_info.frequency,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -846,6 +916,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             get_recording_status,
+            list_displays,
             get_click_timeline,
             get_frame_timeline,
             initialize_gpu_renderer,
