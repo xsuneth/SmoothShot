@@ -347,6 +347,38 @@ fn apply_zoom_transform_rgba(
     output
 }
 
+fn build_export_frame_indices(frames: &[RawFrame], target_fps: u32) -> Vec<usize> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    let interval_ms = 1000.0_f64 / target_fps.max(1) as f64;
+    let last_timestamp_ms = frames
+        .last()
+        .map(|frame| frame.timestamp_ms as f64)
+        .unwrap_or_default();
+    let output_len = ((last_timestamp_ms / interval_ms).floor() as usize).saturating_add(1);
+
+    let mut indices = Vec::with_capacity(output_len.max(frames.len()));
+    let mut source_idx = 0usize;
+
+    for output_idx in 0..output_len {
+        let output_timestamp_ms = output_idx as f64 * interval_ms;
+        while source_idx + 1 < frames.len()
+            && (frames[source_idx + 1].timestamp_ms as f64) <= output_timestamp_ms
+        {
+            source_idx += 1;
+        }
+        indices.push(source_idx);
+    }
+
+    if indices.is_empty() {
+        indices.push(frames.len() - 1);
+    }
+
+    indices
+}
+
 fn button_name(index: usize) -> String {
     match index {
         1 => "left".to_string(),
@@ -831,6 +863,7 @@ fn export_recording(
     let width = frames_guard[0].width;
     let height = frames_guard[0].height;
     let fps = recorder.target_fps.max(1);
+    let export_frame_indices = build_export_frame_indices(&frames_guard, fps);
 
     let mut child = Command::new("ffmpeg")
         .arg("-y")
@@ -866,7 +899,8 @@ fn export_recording(
         .take()
         .ok_or_else(|| "failed to open ffmpeg stdin".to_string())?;
 
-    for frame in frames_guard.iter() {
+    for source_index in &export_frame_indices {
+        let frame = &frames_guard[*source_index];
         let (zoom, focus_x, focus_y) = best_zoom_and_focus(
             frame.timestamp_ms,
             frame.cursor_x,
@@ -900,7 +934,7 @@ fn export_recording(
 
     Ok(ExportRecordingResponse {
         output_path: output_path.to_string_lossy().to_string(),
-        frames_exported: frames_guard.len(),
+        frames_exported: export_frame_indices.len(),
         width: 1920,
         height: 1080,
         target_fps: fps,
