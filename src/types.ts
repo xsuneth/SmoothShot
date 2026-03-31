@@ -17,6 +17,10 @@ export type StopRecordingResponse = {
   durationMs: number;
   framesCaptured: number;
   clicksDetected: number;
+  /** Path to the session folder written to disk (if persistence succeeded). */
+  sessionFolder: string | null;
+  /** Path to the proxy MP4 (set after calling generate_preview_proxy). */
+  proxyPath: string | null;
 };
 
 export type ClickEvent = {
@@ -91,4 +95,28 @@ export type BackgroundStyle = {
   tab: BackgroundTab;
   value: string;
   blur: number;
+};
+
+export type GeneratePreviewProxyResponse = {
+  proxyPath: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  targetFps: number;
+};
+
+export type AudioStatus = {
+  systemAudioAvailable: boolean;
+  micAvailable: boolean;
+  systemAudioEnabled: boolean;
+  micEnabled: boolean;
+  systemAudioGain: number;
+  micGain: number;
+};
+
+export type AudioConfig = {
+  systemAudioEnabled: boolean;
+  micEnabled: boolean;
+  systemAudioGain: number;
+  micGain: number;
 };

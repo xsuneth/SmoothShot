@@ -1,6 +1,7 @@
 type EditorHeaderProps = {
   isExporting: boolean;
   recording: boolean;
+  sessionFolder: string | null;
   onStartNewRecordingFlow: () => void | Promise<void>;
   onInitializeGpuRenderer: () => void | Promise<void>;
   onGenerateZoomPreview: () => void | Promise<void>;
@@ -10,11 +11,16 @@ type EditorHeaderProps = {
 export function EditorHeader({
   isExporting,
   recording,
+  sessionFolder,
   onStartNewRecordingFlow,
   onInitializeGpuRenderer,
   onGenerateZoomPreview,
   onExportRecording,
 }: EditorHeaderProps) {
+  // Derive a human-readable session label from the folder path if available.
+  const sessionLabel = sessionFolder
+    ? sessionFolder.split(/[\\/]/).pop() ?? "SmoothShot"
+    : null;
   return (
     <header className="flex h-14 items-center justify-between border-b border-white/8 px-4 text-white">
       <div className="flex items-center gap-4">
@@ -40,7 +46,7 @@ export function EditorHeader({
 
       <div className="min-w-0 flex-1 px-6 text-center">
         <p className="truncate text-sm font-medium text-white/90">
-          Area 2026-03-31 05:07:47 <span className="text-white/35">smoothshot</span>
+          {sessionLabel ?? "No session"} <span className="text-white/35">smoothshot</span>
         </p>
       </div>
 

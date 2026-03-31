@@ -13,11 +13,13 @@ import { LauncherBar } from "./components/LauncherBar";
 import { TimelinePanel } from "./components/TimelinePanel";
 import type {
   AppView,
+  AudioConfig,
   BackgroundStyle,
   CaptureRegion,
   ClickEvent,
   DisplayDescriptor,
   ExportRecordingResponse,
+  GeneratePreviewProxyResponse,
   GpuInitStatus,
   LauncherMode,
   RecordingStatus,
@@ -281,11 +283,26 @@ function App() {
       setZoomMarkers(clickEventsToMarkers(clicks));
       const nextStatus = await invoke<RecordingStatus>("get_recording_status");
       setStatus(nextStatus);
+
+      // Generate a proxy video immediately so the editor preview works
+      // without requiring a full export first.
+      if (result.sessionFolder) {
+        try {
+          const proxy = await invoke<GeneratePreviewProxyResponse>("generate_preview_proxy");
+          setPreviewUrl(toLocalFileUrl(proxy.proxyPath));
+          setPreviewDurationMs(proxy.durationMs);
+          setMessage("Recording complete. Preview ready – editor opened.");
+        } catch {
+          setMessage("Recording complete. Editor opened. Export to load preview.");
+        }
+      } else {
+        setMessage("Recording complete. Editor window opened for trim and styling.");
+      }
+
       await openEditorWindow();
       if (windowLabel === "editor") {
         setView("editor");
       }
-      setMessage("Recording complete. Editor window opened for trim and styling.");
     } catch (error) {
       setMessage(`Could not stop recording: ${String(error)}`);
     }
@@ -351,7 +368,7 @@ function App() {
   async function exportRecording() {
     try {
       setIsExporting(true);
-      const exportResult = await invoke<ExportRecordingResponse>("export_recording", {
+      const exportResult = await invoke<ExportRecordingResponse>("export_recording_cmd", {
         request: {
           outputPath: exportPath.trim().length > 0 ? exportPath.trim() : null,
           maxZoom,
@@ -426,6 +443,42 @@ function App() {
     }
   }
 
+  async function toggleMic() {
+    try {
+      const next = !micEnabled;
+      setMicEnabled(next);
+      await invoke("set_audio_config", {
+        config: {
+          systemAudioEnabled: appAudioEnabled,
+          micEnabled: next,
+          systemAudioGain: 1.0,
+          micGain: 1.0,
+        } satisfies AudioConfig,
+      });
+    } catch {
+      // Revert on error.
+      setMicEnabled((prev) => !prev);
+    }
+  }
+
+  async function toggleAppAudio() {
+    try {
+      const next = !appAudioEnabled;
+      setAppAudioEnabled(next);
+      await invoke("set_audio_config", {
+        config: {
+          systemAudioEnabled: next,
+          micEnabled: micEnabled,
+          systemAudioGain: 1.0,
+          micGain: 1.0,
+        } satisfies AudioConfig,
+      });
+    } catch {
+      // Revert on error.
+      setAppAudioEnabled((prev) => !prev);
+    }
+  }
+
   async function startNewRecordingFlow() {
     if (windowLabel === "editor") {
       const mainWindow = await WebviewWindow.getByLabel("main");
@@ -457,7 +510,7 @@ function App() {
 
   function togglePreviewPlayback() {
     if (!previewUrl) {
-      setMessage("Export once to load a real video preview.");
+      setMessage("Proxy preview not yet available. Try stopping a recording first, or export.");
       return;
     }
 
@@ -532,8 +585,8 @@ function App() {
         onCycleDisplaySelection={cycleDisplaySelection}
         onSetFps={setFps}
         onToggleCamera={() => setCameraEnabled((prev) => !prev)}
-        onToggleMic={() => setMicEnabled((prev) => !prev)}
-        onToggleAppAudio={() => setAppAudioEnabled((prev) => !prev)}
+        onToggleMic={() => void toggleMic()}
+        onToggleAppAudio={() => void toggleAppAudio()}
         onOpenEditor={() => void openEditorWindow()}
         onStartRecording={() => void startRecording()}
         onStopRecording={() => void stopRecording()}
@@ -549,6 +602,7 @@ function App() {
       <EditorHeader
         isExporting={isExporting}
         recording={recording}
+        sessionFolder={lastSession?.sessionFolder ?? null}
         onStartNewRecordingFlow={() => void startNewRecordingFlow()}
         onInitializeGpuRenderer={() => void initializeGpuRenderer()}
         onGenerateZoomPreview={() => void generateZoomPreview()}
