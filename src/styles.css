@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cream-50: #f8f3ea;
+  --color-cream-100: #f3ebdc;
+  --color-cream-200: #eadfca;
+  --color-ink-900: #1f1913;
+  --color-ink-700: #43362a;
+  --color-ink-500: #7f7365;
+  --color-shell-100: rgba(255, 255, 255, 0.7);
+  --color-shell-200: rgba(255, 255, 255, 0.9);
+  --color-line-100: rgba(111, 91, 59, 0.14);
+  --color-line-200: rgba(105, 80, 49, 0.12);
+  --color-accent-500: #eb5642;
+  --color-accent-700: #a1322b;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    background: transparent;
+    color: var(--color-ink-900);
+    font-family: "Segoe UI", "Inter", sans-serif;
+  }
+
+  #root {
+    width: 100%;
+  }
+
+  button,
+  input,
+  select {
+    font: inherit;
+  }
+}
+
+@layer utilities {
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+}
+
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}

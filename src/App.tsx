@@ -1,89 +1,30 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
-import "./App.css";
 
-type CaptureRegion = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-type RecordingStatus = {
-  isRecording: boolean;
-  targetFps: number;
-  framesCaptured: number;
-  clicksDetected: number;
-};
-
-type StopRecordingResponse = {
-  targetFps: number;
-  durationMs: number;
-  framesCaptured: number;
-  clicksDetected: number;
-};
-
-type ClickEvent = {
-  timestampMs: number;
-  cursorX: number;
-  cursorY: number;
-  button: string;
-};
-
-type GpuInitStatus = {
-  initialized: boolean;
-  adapterName: string | null;
-  backend: string | null;
-};
-
-type ZoomProfile = {
-  zoomInMs: number;
-  holdMs: number;
-  zoomOutMs: number;
-  maxZoom: number;
-  easing: string;
-};
-
-type ZoomTransformFrame = {
-  frameIndex: number;
-  timestampMs: number;
-  zoom: number;
-  focusX: number;
-  focusY: number;
-  clickDriven: boolean;
-};
-
-type ZoomPreviewResponse = {
-  frames: ZoomTransformFrame[];
-  clickCount: number;
-  profile: ZoomProfile;
-};
-
-type ExportRecordingResponse = {
-  outputPath: string;
-  framesExported: number;
-  width: number;
-  height: number;
-  targetFps: number;
-  outputDurationMs: number;
-};
-
-type DisplayDescriptor = {
-  index: number;
-  id: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  isPrimary: boolean;
-  scaleFactor: number;
-  frequency: number;
-};
-
-type LauncherMode = "display" | "window" | "area" | "device";
-type AppView = "launcher" | "editor";
+import { EditorHeader } from "./components/EditorHeader";
+import { EditorInspector } from "./components/EditorInspector";
+import { EditorPreview } from "./components/EditorPreview";
+import { ExportResult } from "./components/ExportResult";
+import { LauncherBar } from "./components/LauncherBar";
+import { TimelinePanel } from "./components/TimelinePanel";
+import type {
+  AppView,
+  BackgroundStyle,
+  CaptureRegion,
+  ClickEvent,
+  DisplayDescriptor,
+  ExportRecordingResponse,
+  GpuInitStatus,
+  LauncherMode,
+  RecordingStatus,
+  StopRecordingResponse,
+  ZoomMarker,
+  ZoomPreviewResponse,
+} from "./types";
 
 function detectWindowLabel() {
   try {
@@ -116,7 +57,7 @@ function App() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [displays, setDisplays] = useState<DisplayDescriptor[]>([]);
   const [displaySelection, setDisplaySelection] = useState("auto");
-  const [message, setMessage] = useState("Ready for capture.");
+  const [message, setMessage] = useState("");
   const [fps, setFps] = useState(60);
   const [isExporting, setIsExporting] = useState(false);
   const [exportPath, setExportPath] = useState("");
@@ -125,7 +66,7 @@ function App() {
   const [holdMs, setHoldMs] = useState(120);
   const [zoomOutMs, setZoomOutMs] = useState(260);
   const [regionEnabled, setRegionEnabled] = useState(false);
-  const [region, setRegion] = useState<CaptureRegion>({
+  const [region] = useState<CaptureRegion>({
     x: 100,
     y: 100,
     width: 1280,
@@ -139,26 +80,26 @@ function App() {
   const [padding, setPadding] = useState(32);
   const [scalePercent, setScalePercent] = useState(100);
   const [audioGain, setAudioGain] = useState(100);
+  const [backgroundStyle, setBackgroundStyle] = useState<BackgroundStyle>({
+    tab: "wallpaper",
+    value: "macos",
+    blur: 0,
+  });
+  const [currentTimeMs, setCurrentTimeMs] = useState(0);
+  const [previewDurationMs, setPreviewDurationMs] = useState(0);
+  const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+  const [zoomMarkers, setZoomMarkers] = useState<ZoomMarker[]>([]);
+  const [backgroundImageFileName, setBackgroundImageFileName] = useState("");
 
-  const frameRateText = useMemo(
-    () => `${status.targetFps}fps target`,
-    [status.targetFps],
-  );
-
-  const selectedDisplayLabel = useMemo(() => {
-    if (displaySelection === "auto") {
-      return "Auto display selection";
-    }
-
-    const selected = displays.find((display) => String(display.index) === displaySelection);
-    if (!selected) {
-      return "Custom display selection";
-    }
-
-    return `${selected.isPrimary ? "Primary" : `Display ${selected.index + 1}`} ${selected.width}x${selected.height}`;
-  }, [displaySelection, displays]);
-
-  const sessionDurationMs = lastSession?.durationMs ?? 0;
+  const sessionDurationMs = Math.max(lastSession?.durationMs ?? 0, previewDurationMs);
+  const canOpenEditor = Boolean(lastSession) || status.framesCaptured > 0;
+  const selectedDisplay = displays.find((display) => String(display.index) === displaySelection);
+  const selectedDisplayLabel =
+    displaySelection === "auto"
+      ? "Auto display"
+      : selectedDisplay
+        ? `${selectedDisplay.isPrimary ? "Primary" : `Display ${selectedDisplay.index + 1}`} ${selectedDisplay.width}x${selectedDisplay.height}`
+        : "Selected display";
 
   useEffect(() => {
     void loadDisplays();
@@ -203,13 +144,32 @@ function App() {
   }, [windowLabel]);
 
   useEffect(() => {
-    if (launcherMode === "area") {
-      setRegionEnabled(true);
+    if (windowLabel !== "main") {
       return;
     }
 
-    setRegionEnabled(false);
+    void positionLauncherBar();
+  }, [windowLabel]);
+
+  useEffect(() => {
+    setRegionEnabled(launcherMode === "area");
   }, [launcherMode]);
+
+  useEffect(() => {
+    return () => {
+      if (backgroundStyle.tab === "image" && backgroundStyle.value.startsWith("blob:")) {
+        URL.revokeObjectURL(backgroundStyle.value);
+      }
+    };
+  }, [backgroundStyle]);
+
+  function clickEventsToMarkers(clicks: ClickEvent[]): ZoomMarker[] {
+    return clicks.slice(-8).map((event, index) => ({
+      id: `${event.timestampMs}-${index}`,
+      label: "Zoom",
+      timeMs: event.timestampMs,
+    }));
+  }
 
   async function loadDisplays() {
     try {
@@ -217,6 +177,39 @@ function App() {
       setDisplays(availableDisplays);
     } catch {
       setDisplays([]);
+    }
+  }
+
+  async function positionLauncherBar() {
+    try {
+      const win = getCurrentWindow();
+      const monitor = await currentMonitor();
+      if (!monitor) {
+        return;
+      }
+
+      const windowSize = await win.innerSize();
+      const scale = monitor.scaleFactor || 1;
+      const monitorX = monitor.position.x / scale;
+      const monitorY = monitor.position.y / scale;
+      const monitorWidth = monitor.size.width / scale;
+      const monitorHeight = monitor.size.height / scale;
+      const width = windowSize.width / scale;
+      const height = windowSize.height / scale;
+
+      const x = Math.round(monitorX + (monitorWidth - width) / 2);
+      const y = Math.round(monitorY + monitorHeight - height - 80);
+      await win.setPosition(new LogicalPosition(x, y));
+    } catch {
+      // Ignore positioning failures and keep default placement.
+    }
+  }
+
+  async function hideLauncher() {
+    try {
+      await getCurrentWindow().hide();
+    } catch {
+      // Ignore hide failures.
     }
   }
 
@@ -230,6 +223,27 @@ function App() {
     setLauncherMode(mode);
   }
 
+  function cycleDisplaySelection() {
+    if (displays.length === 0) {
+      return;
+    }
+
+    const options = ["auto", ...displays.map((display) => String(display.index))];
+    const currentIndex = options.indexOf(displaySelection);
+    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % options.length : 0;
+    const nextSelection = options[nextIndex];
+    const nextDisplay = displays.find((display) => String(display.index) === nextSelection);
+    const nextLabel =
+      nextSelection === "auto"
+        ? "Auto display"
+        : nextDisplay
+          ? `${nextDisplay.isPrimary ? "Primary" : `Display ${nextDisplay.index + 1}`} ${nextDisplay.width}x${nextDisplay.height}`
+          : "Selected display";
+
+    setDisplaySelection(nextSelection);
+    setMessage(`Capture source: ${nextLabel}`);
+  }
+
   async function startRecording() {
     try {
       const request = {
@@ -237,14 +251,16 @@ function App() {
         region: regionEnabled ? region : null,
         displayIndex: displaySelection === "auto" ? null : Number(displaySelection),
       };
-      const nextStatus = await invoke<RecordingStatus>("start_recording", {
-        request,
-      });
+      const nextStatus = await invoke<RecordingStatus>("start_recording", { request });
       setStatus(nextStatus);
       setRecording(true);
       setLastSession(null);
       setTimeline([]);
+      setZoomMarkers([]);
       setPreviewUrl(null);
+      setCurrentTimeMs(0);
+      setPreviewDurationMs(0);
+      setIsPlayingPreview(false);
       setMessage("Recording started. Click naturally to generate zoom markers.");
     } catch (error) {
       setMessage(`Could not start recording: ${String(error)}`);
@@ -258,8 +274,11 @@ function App() {
       setRecording(false);
       setTrimStartMs(0);
       setTrimEndMs(result.durationMs);
+      setCurrentTimeMs(0);
+      setIsPlayingPreview(false);
       const clicks = await invoke<ClickEvent[]>("get_click_timeline");
       setTimeline(clicks.slice(-16).reverse());
+      setZoomMarkers(clickEventsToMarkers(clicks));
       const nextStatus = await invoke<RecordingStatus>("get_recording_status");
       setStatus(nextStatus);
       await openEditorWindow();
@@ -283,17 +302,13 @@ function App() {
       setStatus(nextStatus);
       setRecording(nextStatus.isRecording);
       setTimeline(clicks.slice(-16).reverse());
+      setZoomMarkers(clickEventsToMarkers(clicks));
 
       if (summary) {
         setLastSession(summary);
         setTrimStartMs((prev) => Math.min(prev, summary.durationMs));
-        setTrimEndMs((prev) => {
-          if (prev <= 0) {
-            return summary.durationMs;
-          }
-
-          return Math.min(prev, summary.durationMs);
-        });
+        setTrimEndMs((prev) => (prev <= 0 ? summary.durationMs : Math.min(prev, summary.durationMs)));
+        setPreviewDurationMs(summary.durationMs);
       }
     } catch {
       // Ignore refresh errors while editor initializes.
@@ -347,6 +362,9 @@ function App() {
       });
       setLastExport(exportResult);
       setPreviewUrl(toLocalFileUrl(exportResult.outputPath));
+      setPreviewDurationMs(exportResult.outputDurationMs);
+      setCurrentTimeMs(0);
+      setIsPlayingPreview(false);
       setMessage(`Export completed: ${exportResult.outputPath}`);
     } catch (error) {
       setMessage(String(error));
@@ -384,9 +402,7 @@ function App() {
     try {
       const next = await invoke<GpuInitStatus>("initialize_gpu_renderer");
       setGpuStatus(next);
-      setMessage(
-        `GPU renderer ready on ${next.backend ?? "unknown"} (${next.adapterName ?? "adapter"}).`,
-      );
+      setMessage(`GPU renderer ready on ${next.backend ?? "unknown"} (${next.adapterName ?? "adapter"}).`);
     } catch (error) {
       setMessage(`Could not initialize GPU renderer: ${String(error)}`);
     }
@@ -425,384 +441,192 @@ function App() {
     setView("launcher");
     setLastExport(null);
     setPreviewUrl(null);
+    setCurrentTimeMs(0);
+    setPreviewDurationMs(0);
+    setIsPlayingPreview(false);
     setMessage("Back to launcher. Configure and start a new recording.");
+  }
+
+  function seekPreview(timeMs: number) {
+    setCurrentTimeMs(Math.min(Math.max(0, timeMs), Math.max(sessionDurationMs, 0)));
+  }
+
+  function seekPreviewBy(deltaMs: number) {
+    seekPreview(currentTimeMs + deltaMs);
+  }
+
+  function togglePreviewPlayback() {
+    if (!previewUrl) {
+      setMessage("Export once to load a real video preview.");
+      return;
+    }
+
+    setIsPlayingPreview((prev) => !prev);
+  }
+
+  function updateBackgroundTab(tab: BackgroundStyle["tab"]) {
+    setBackgroundStyle((prev) => {
+      if (prev.tab === tab) {
+        return prev;
+      }
+
+      const nextValue =
+        tab === "wallpaper" ? "macos" :
+        tab === "gradient" ? "aurora" :
+        tab === "color" ? "midnight" :
+        "";
+
+      return {
+        ...prev,
+        tab,
+        value: nextValue,
+      };
+    });
+  }
+
+  function updateZoomMarker(markerId: string, timeMs: number) {
+    setZoomMarkers((prev) =>
+      prev.map((marker) =>
+        marker.id === markerId
+          ? { ...marker, timeMs: Math.min(Math.max(0, timeMs), Math.max(sessionDurationMs, 1000)) }
+          : marker,
+      ),
+    );
+  }
+
+  function updateBackgroundImage(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    setBackgroundStyle((prev) => {
+      if (prev.tab === "image" && prev.value.startsWith("blob:")) {
+        URL.revokeObjectURL(prev.value);
+      }
+
+      return {
+        ...prev,
+        tab: "image",
+        value: URL.createObjectURL(file),
+      };
+    });
+    setBackgroundImageFileName(file.name);
   }
 
   if (view === "launcher") {
     return (
-      <main className="app-root">
-        <section className="launcher-bar">
-          <button type="button" className="icon-circle" aria-label="Close launcher">
-            x
-          </button>
-
-          <div className="mode-group">
-            <button
-              type="button"
-              className={launcherMode === "display" ? "mode-chip active" : "mode-chip"}
-              onClick={() => selectLauncherMode("display")}
-            >
-              Display
-            </button>
-            <button
-              type="button"
-              className={launcherMode === "window" ? "mode-chip active" : "mode-chip"}
-              onClick={() => selectLauncherMode("window")}
-            >
-              Window
-            </button>
-            <button
-              type="button"
-              className={launcherMode === "area" ? "mode-chip active" : "mode-chip"}
-              onClick={() => selectLauncherMode("area")}
-            >
-              Area
-            </button>
-            <button
-              type="button"
-              className={launcherMode === "device" ? "mode-chip active" : "mode-chip"}
-              onClick={() => selectLauncherMode("device")}
-            >
-              Device
-            </button>
-          </div>
-
-          <div className="toggle-group">
-            <button
-              type="button"
-              className={cameraEnabled ? "toggle-pill enabled" : "toggle-pill"}
-              onClick={() => setCameraEnabled((prev) => !prev)}
-            >
-              {cameraEnabled ? "Camera on" : "No camera"}
-            </button>
-            <button
-              type="button"
-              className={micEnabled ? "toggle-pill enabled" : "toggle-pill"}
-              onClick={() => setMicEnabled((prev) => !prev)}
-            >
-              {micEnabled ? "Microphone on" : "No microphone"}
-            </button>
-            <button
-              type="button"
-              className={appAudioEnabled ? "toggle-pill enabled" : "toggle-pill"}
-              onClick={() => setAppAudioEnabled((prev) => !prev)}
-            >
-              {appAudioEnabled ? "Sound from 1 app" : "Sound off"}
-            </button>
-          </div>
-        </section>
-
-        <section className="launcher-panel">
-          <div className="panel-row">
-            <label>
-              Display
-              <select
-                value={displaySelection}
-                onChange={(event) => setDisplaySelection(event.currentTarget.value)}
-                disabled={recording}
-              >
-                <option value="auto">Auto (cursor monitor at start)</option>
-                {displays.map((display) => (
-                  <option key={display.id} value={display.index}>
-                    {display.isPrimary ? "Primary" : `Display ${display.index + 1}`} - {display.width}x{display.height}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              FPS
-              <input
-                type="number"
-                value={fps}
-                min={24}
-                max={60}
-                onChange={(event) => setFps(Number(event.currentTarget.value))}
-                disabled={recording}
-              />
-            </label>
-
-            <label>
-              Status
-              <input type="text" value={recording ? "Recording" : "Ready"} disabled />
-            </label>
-          </div>
-
-          {regionEnabled && (
-            <div className="panel-row">
-              <label>
-                X
-                <input
-                  type="number"
-                  value={region.x}
-                  onChange={(event) =>
-                    setRegion((prev) => ({ ...prev, x: Number(event.currentTarget.value) }))
-                  }
-                  disabled={recording}
-                />
-              </label>
-              <label>
-                Y
-                <input
-                  type="number"
-                  value={region.y}
-                  onChange={(event) =>
-                    setRegion((prev) => ({ ...prev, y: Number(event.currentTarget.value) }))
-                  }
-                  disabled={recording}
-                />
-              </label>
-              <label>
-                Width
-                <input
-                  type="number"
-                  value={region.width}
-                  onChange={(event) =>
-                    setRegion((prev) => ({ ...prev, width: Number(event.currentTarget.value) }))
-                  }
-                  disabled={recording}
-                />
-              </label>
-              <label>
-                Height
-                <input
-                  type="number"
-                  value={region.height}
-                  onChange={(event) =>
-                    setRegion((prev) => ({ ...prev, height: Number(event.currentTarget.value) }))
-                  }
-                  disabled={recording}
-                />
-              </label>
-            </div>
-          )}
-
-          <div className="launcher-actions">
-            <button type="button" onClick={startRecording} disabled={recording}>
-              Start Recording
-            </button>
-            <button type="button" onClick={stopRecording} disabled={!recording}>
-              Stop Recording
-            </button>
-            <button type="button" onClick={loadDisplays} disabled={recording}>
-              Refresh Displays
-            </button>
-            <button
-              type="button"
-              onClick={() => void openEditorWindow()}
-              disabled={recording || (!lastSession && status.framesCaptured === 0)}
-            >
-              Open Editor
-            </button>
-          </div>
-
-          <div className="session-strip">
-            <span>{selectedDisplayLabel}</span>
-            <span>{frameRateText}</span>
-            <span>{status.framesCaptured.toLocaleString()} frames</span>
-            <span>{status.clicksDetected.toLocaleString()} clicks</span>
-          </div>
-        </section>
-
-        <p className="message-text">{message}</p>
-      </main>
+      <LauncherBar
+        launcherMode={launcherMode}
+        displays={displays}
+        displaySelection={displaySelection}
+        selectedDisplayLabel={selectedDisplayLabel}
+        fps={fps}
+        region={region}
+        cameraEnabled={cameraEnabled}
+        micEnabled={micEnabled}
+        appAudioEnabled={appAudioEnabled}
+        recording={recording}
+        canOpenEditor={canOpenEditor}
+        onHide={hideLauncher}
+        onSelectMode={selectLauncherMode}
+        onCycleDisplaySelection={cycleDisplaySelection}
+        onSetFps={setFps}
+        onToggleCamera={() => setCameraEnabled((prev) => !prev)}
+        onToggleMic={() => setMicEnabled((prev) => !prev)}
+        onToggleAppAudio={() => setAppAudioEnabled((prev) => !prev)}
+        onOpenEditor={() => void openEditorWindow()}
+        onStartRecording={() => void startRecording()}
+        onStopRecording={() => void stopRecording()}
+        onShowSourceInfo={() =>
+          setMessage(`Source: ${selectedDisplayLabel}${launcherMode === "area" ? ` | Area ${region.width}x${region.height}` : ""}`)
+        }
+      />
     );
   }
 
   return (
-    <main className="editor-root">
-      <header className="editor-topbar">
-        <div className="editor-title">
-          <p className="eyebrow">SmoothShot Editor</p>
-          <h1>Recording Session</h1>
-        </div>
-        <div className="editor-actions">
-          <button type="button" onClick={() => void startNewRecordingFlow()}>Launcher</button>
-          <button type="button" onClick={initializeGpuRenderer}>Init GPU</button>
-          <button type="button" onClick={generateZoomPreview}>Analyze Zoom</button>
-          <button
-            type="button"
-            className="primary"
-            onClick={exportRecording}
-            disabled={recording || isExporting}
-          >
-            {isExporting ? "Exporting..." : "Export 1080p60"}
-          </button>
-        </div>
-      </header>
+    <main className="min-h-screen overflow-hidden bg-[#05060b] text-white">
+      <EditorHeader
+        isExporting={isExporting}
+        recording={recording}
+        onStartNewRecordingFlow={() => void startNewRecordingFlow()}
+        onInitializeGpuRenderer={() => void initializeGpuRenderer()}
+        onGenerateZoomPreview={() => void generateZoomPreview()}
+        onExportRecording={() => void exportRecording()}
+      />
 
-      <section className="editor-grid">
-        <article className="editor-canvas">
-          <h2>Preview</h2>
-          {!previewUrl && (
-            <p className="placeholder">
-              Export once to load preview. Timeline and style controls are now prepared for the editor phase.
-            </p>
-          )}
-          {previewUrl && (
-            <video className="preview-player" src={previewUrl} controls preload="metadata" />
-          )}
-
-          <div className="transport-row">
-            <span>Duration: {(sessionDurationMs / 1000).toFixed(2)}s</span>
-            <span>Frames: {status.framesCaptured.toLocaleString()}</span>
-            <span>Clicks: {status.clicksDetected.toLocaleString()}</span>
-            {gpuStatus && <span>GPU: {gpuStatus.backend ?? "unknown"}</span>}
-          </div>
-        </article>
-
-        <aside className="editor-inspector">
-          <section className="inspector-block">
-            <h3>Trim</h3>
-            <label>
-              Start (ms)
-              <input
-                type="number"
-                min={0}
-                max={Math.max(trimEndMs, 0)}
-                value={trimStartMs}
-                onChange={(event) => setTrimStartMs(Number(event.currentTarget.value))}
-              />
-            </label>
-            <label>
-              End (ms)
-              <input
-                type="number"
-                min={trimStartMs}
-                max={Math.max(sessionDurationMs, trimStartMs)}
-                value={trimEndMs}
-                onChange={(event) => setTrimEndMs(Number(event.currentTarget.value))}
-              />
-            </label>
-          </section>
-
-          <section className="inspector-block">
-            <h3>Frame Style</h3>
-            <label>
-              Padding
-              <input
-                type="range"
-                min={0}
-                max={120}
-                value={padding}
-                onChange={(event) => setPadding(Number(event.currentTarget.value))}
-              />
-            </label>
-            <label>
-              Scale %
-              <input
-                type="range"
-                min={70}
-                max={110}
-                value={scalePercent}
-                onChange={(event) => setScalePercent(Number(event.currentTarget.value))}
-              />
-            </label>
-          </section>
-
-          <section className="inspector-block">
-            <h3>Zoom</h3>
-            <label>
-              Max Zoom
-              <input
-                type="number"
-                step="0.05"
-                min={1.05}
-                max={3}
-                value={maxZoom}
-                onChange={(event) => setMaxZoom(Number(event.currentTarget.value))}
-              />
-            </label>
-            <label>
-              In / Hold / Out
-              <div className="compact-grid">
-                <input
-                  type="number"
-                  min={60}
-                  value={zoomInMs}
-                  onChange={(event) => setZoomInMs(Number(event.currentTarget.value))}
-                />
-                <input
-                  type="number"
-                  min={0}
-                  value={holdMs}
-                  onChange={(event) => setHoldMs(Number(event.currentTarget.value))}
-                />
-                <input
-                  type="number"
-                  min={80}
-                  value={zoomOutMs}
-                  onChange={(event) => setZoomOutMs(Number(event.currentTarget.value))}
-                />
-              </div>
-            </label>
-          </section>
-
-          <section className="inspector-block">
-            <h3>Audio</h3>
-            <label>
-              Gain %
-              <input
-                type="range"
-                min={0}
-                max={150}
-                value={audioGain}
-                onChange={(event) => setAudioGain(Number(event.currentTarget.value))}
-              />
-            </label>
-          </section>
-
-          <section className="inspector-block">
-            <h3>Export</h3>
-            <label>
-              Output Path (optional)
-              <input
-                type="text"
-                value={exportPath}
-                onChange={(event) => setExportPath(event.currentTarget.value)}
-                placeholder="D:/Videos/smoothshot.mp4"
-                disabled={isExporting}
-              />
-            </label>
-            <div className="editor-actions">
-              <button type="button" onClick={openExportedFile} disabled={!lastExport}>
-                Open File
-              </button>
-            </div>
-          </section>
-        </aside>
+      <section className="grid min-h-[calc(100vh-56px-210px)] grid-cols-[minmax(0,1fr)_320px]">
+        <EditorPreview
+          backgroundStyle={backgroundStyle}
+          currentTimeMs={currentTimeMs}
+          gpuStatus={gpuStatus}
+          isPlaying={isPlayingPreview}
+          previewUrl={previewUrl}
+          sessionDurationMs={sessionDurationMs}
+          status={status}
+          scalePercent={scalePercent}
+          onDurationChange={setPreviewDurationMs}
+          onSeekBy={seekPreviewBy}
+          onTimeChange={setCurrentTimeMs}
+          onTogglePlay={togglePreviewPlayback}
+          onPlaybackEnded={() => setIsPlayingPreview(false)}
+        />
+        <EditorInspector
+          audioGain={audioGain}
+          backgroundStyle={backgroundStyle}
+          backgroundImageFileName={backgroundImageFileName}
+          exportPath={exportPath}
+          holdMs={holdMs}
+          isExporting={isExporting}
+          lastExportExists={Boolean(lastExport)}
+          maxZoom={maxZoom}
+          padding={padding}
+          scalePercent={scalePercent}
+          sessionDurationMs={sessionDurationMs}
+          trimEndMs={trimEndMs}
+          trimStartMs={trimStartMs}
+          zoomInMs={zoomInMs}
+          zoomOutMs={zoomOutMs}
+          onSetTrimStartMs={setTrimStartMs}
+          onSetTrimEndMs={setTrimEndMs}
+          onSetPadding={setPadding}
+          onSetScalePercent={setScalePercent}
+          onSetMaxZoom={setMaxZoom}
+          onSetZoomInMs={setZoomInMs}
+          onSetHoldMs={setHoldMs}
+          onSetZoomOutMs={setZoomOutMs}
+          onSetAudioGain={setAudioGain}
+          onSetExportPath={setExportPath}
+          onOpenExportedFile={() => void openExportedFile()}
+          onSetBackgroundTab={updateBackgroundTab}
+          onSetBackgroundValue={(value) => setBackgroundStyle((prev) => ({ ...prev, value }))}
+          onSetBackgroundBlur={(value) => setBackgroundStyle((prev) => ({ ...prev, blur: value }))}
+          onSetBackgroundImage={updateBackgroundImage}
+        />
       </section>
 
-      <section className="timeline-shell">
-        <h2>Timeline</h2>
-        <div className="timeline-track">
-          {timeline.length === 0 && <span className="placeholder">No click markers yet.</span>}
-          {timeline.map((event, index) => (
-            <span key={`${event.timestampMs}-${index}`} className="timeline-marker">
-              {Math.round(event.timestampMs / 1000)}s
-            </span>
-          ))}
-        </div>
-        <div className="timeline-meta">
-          <span>Trim: {trimStartMs}ms to {trimEndMs}ms</span>
-          <span>Padding: {padding}</span>
-          <span>Scale: {scalePercent}%</span>
-          <span>Audio: {audioGain}%</span>
-          {zoomPreview && <span>Zoom events: {zoomPreview.clickCount}</span>}
-        </div>
-      </section>
+      <TimelinePanel
+        audioGain={audioGain}
+        currentTimeMs={currentTimeMs}
+        durationMs={sessionDurationMs}
+        isPlaying={isPlayingPreview}
+        padding={padding}
+        scalePercent={scalePercent}
+        timeline={timeline}
+        trimEndMs={trimEndMs}
+        trimStartMs={trimStartMs}
+        zoomPreview={zoomPreview}
+        onSeek={seekPreview}
+        onTogglePlay={togglePreviewPlayback}
+        zoomMarkers={zoomMarkers}
+        onMoveZoomMarker={updateZoomMarker}
+        onTrimStartChange={setTrimStartMs}
+        onTrimEndChange={setTrimEndMs}
+      />
 
-      {lastExport && (
-        <section className="export-result">
-          <p>Exported: {lastExport.outputPath}</p>
-          <p>
-            {lastExport.width}x{lastExport.height} at {lastExport.targetFps}fps |
-            {" "}{(lastExport.outputDurationMs / 1000).toFixed(2)}s
-          </p>
-        </section>
-      )}
+      {lastExport && <ExportResult lastExport={lastExport} />}
 
-      <p className="message-text">{message}</p>
+      <p className="px-4 py-2 text-[0.82rem] text-[#8f9bb8]">{message}</p>
     </main>
   );
 }
