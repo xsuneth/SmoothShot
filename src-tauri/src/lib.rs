@@ -896,6 +896,43 @@ fn get_click_timeline(state: tauri::State<'_, AppState>) -> Result<Vec<ClickEven
 }
 
 #[tauri::command]
+fn get_last_session_summary(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<StopRecordingResponse>, String> {
+    let recorder = state
+        .recorder
+        .lock()
+        .map_err(|_| "failed to lock recorder state".to_string())?;
+
+    if recorder.is_recording {
+        return Ok(None);
+    }
+
+    let frames_captured = recorder
+        .raw_frames
+        .lock()
+        .map_err(|_| "failed to lock frame buffer".to_string())?
+        .len();
+
+    if frames_captured == 0 {
+        return Ok(None);
+    }
+
+    let clicks_detected = recorder
+        .click_events
+        .lock()
+        .map_err(|_| "failed to lock click events".to_string())?
+        .len();
+
+    Ok(Some(StopRecordingResponse {
+        target_fps: recorder.target_fps,
+        duration_ms: recorder.last_session_duration_ms,
+        frames_captured,
+        clicks_detected,
+    }))
+}
+
+#[tauri::command]
 fn get_frame_timeline(
     state: tauri::State<'_, AppState>,
     limit: Option<usize>,
@@ -1264,6 +1301,7 @@ pub fn run() {
             get_recording_status,
             list_displays,
             get_click_timeline,
+            get_last_session_summary,
             get_frame_timeline,
             initialize_gpu_renderer,
             build_zoom_preview,
