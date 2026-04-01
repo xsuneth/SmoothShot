@@ -13,11 +13,14 @@ import { LauncherBar } from "./components/LauncherBar";
 import { TimelinePanel } from "./components/TimelinePanel";
 import type {
   AppView,
+  AudioConfig,
   BackgroundStyle,
   CaptureRegion,
   ClickEvent,
   DisplayDescriptor,
   ExportRecordingResponse,
+  FrameMetadata,
+  GeneratePreviewProxyResponse,
   GpuInitStatus,
   LauncherMode,
   RecordingStatus,
@@ -89,6 +92,7 @@ function App() {
   const [previewDurationMs, setPreviewDurationMs] = useState(0);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
   const [zoomMarkers, setZoomMarkers] = useState<ZoomMarker[]>([]);
+  const [cursorTrack, setCursorTrack] = useState<FrameMetadata[]>([]);
   const [backgroundImageFileName, setBackgroundImageFileName] = useState("");
 
   const sessionDurationMs = Math.max(lastSession?.durationMs ?? 0, previewDurationMs);
@@ -163,11 +167,40 @@ function App() {
     };
   }, [backgroundStyle]);
 
+  useEffect(() => {
+    if (!isPlayingPreview || previewUrl) {
+      return;
+    }
+
+    let frameId = 0;
+    let previous = performance.now();
+
+    function tick(now: number) {
+      const delta = now - previous;
+      previous = now;
+
+      setCurrentTimeMs((prev) => {
+        const next = Math.min(prev + delta, Math.max(sessionDurationMs, 0));
+        if (next >= Math.max(sessionDurationMs, 0)) {
+          setIsPlayingPreview(false);
+        }
+        return next;
+      });
+
+      frameId = window.requestAnimationFrame(tick);
+    }
+
+    frameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [isPlayingPreview, previewUrl, sessionDurationMs]);
+
   function clickEventsToMarkers(clicks: ClickEvent[]): ZoomMarker[] {
     return clicks.slice(-8).map((event, index) => ({
       id: `${event.timestampMs}-${index}`,
       label: "Zoom",
       timeMs: event.timestampMs,
+      cursorX: event.cursorX,
+      cursorY: event.cursorY,
     }));
   }
 
@@ -244,6 +277,13 @@ function App() {
     setMessage(`Capture source: ${nextLabel}`);
   }
 
+  async function notifyEditorSessionUpdated() {
+    const editorWindow = await WebviewWindow.getByLabel("editor");
+    if (editorWindow) {
+      await editorWindow.emit("smoothshot:session-updated");
+    }
+  }
+
   async function startRecording() {
     try {
       const request = {
@@ -257,6 +297,7 @@ function App() {
       setLastSession(null);
       setTimeline([]);
       setZoomMarkers([]);
+      setCursorTrack([]);
       setPreviewUrl(null);
       setCurrentTimeMs(0);
       setPreviewDurationMs(0);
@@ -276,16 +317,38 @@ function App() {
       setTrimEndMs(result.durationMs);
       setCurrentTimeMs(0);
       setIsPlayingPreview(false);
-      const clicks = await invoke<ClickEvent[]>("get_click_timeline");
+      const [clicks, frameTrack, nextStatus] = await Promise.all([
+        invoke<ClickEvent[]>("get_click_timeline"),
+        invoke<FrameMetadata[]>("get_frame_timeline", { limit: 5000 }),
+        invoke<RecordingStatus>("get_recording_status"),
+      ]);
       setTimeline(clicks.slice(-16).reverse());
       setZoomMarkers(clickEventsToMarkers(clicks));
-      const nextStatus = await invoke<RecordingStatus>("get_recording_status");
+      setCursorTrack(frameTrack);
       setStatus(nextStatus);
+      setPreviewDurationMs(result.durationMs);
+
+      setPreviewUrl(null);
+      setMessage("Recording complete. Editor opened with direct frame preview.");
+      if (false) {
+        try {
+          const proxy = await invoke<GeneratePreviewProxyResponse>("generate_preview_proxy");
+          setPreviewUrl(toLocalFileUrl(proxy.proxyPath));
+          setPreviewDurationMs(proxy.durationMs);
+          setMessage("Recording complete. Preview ready – editor opened.");
+        } catch {
+          setMessage("Recording complete. Editor opened. Export to load preview.");
+        }
+      } else {
+        setPreviewUrl(null);
+        setMessage("Recording complete. Editor opened with direct frame preview.");
+      }
+
       await openEditorWindow();
       if (windowLabel === "editor") {
         setView("editor");
       }
-      setMessage("Recording complete. Editor window opened for trim and styling.");
+      void notifyEditorSessionUpdated();
     } catch (error) {
       setMessage(`Could not stop recording: ${String(error)}`);
     }
@@ -293,22 +356,25 @@ function App() {
 
   async function refreshEditorSessionData() {
     try {
-      const [nextStatus, clicks, summary] = await Promise.all([
+      const [nextStatus, clicks, summary, frameTrack] = await Promise.all([
         invoke<RecordingStatus>("get_recording_status"),
         invoke<ClickEvent[]>("get_click_timeline"),
         invoke<StopRecordingResponse | null>("get_last_session_summary"),
+        invoke<FrameMetadata[]>("get_frame_timeline", { limit: 5000 }),
       ]);
 
       setStatus(nextStatus);
       setRecording(nextStatus.isRecording);
       setTimeline(clicks.slice(-16).reverse());
       setZoomMarkers(clickEventsToMarkers(clicks));
+      setCursorTrack(frameTrack);
 
       if (summary) {
         setLastSession(summary);
         setTrimStartMs((prev) => Math.min(prev, summary.durationMs));
         setTrimEndMs((prev) => (prev <= 0 ? summary.durationMs : Math.min(prev, summary.durationMs)));
         setPreviewDurationMs(summary.durationMs);
+        setPreviewUrl(null);
       }
     } catch {
       // Ignore refresh errors while editor initializes.
@@ -351,7 +417,7 @@ function App() {
   async function exportRecording() {
     try {
       setIsExporting(true);
-      const exportResult = await invoke<ExportRecordingResponse>("export_recording", {
+      const exportResult = await invoke<ExportRecordingResponse>("export_recording_cmd", {
         request: {
           outputPath: exportPath.trim().length > 0 ? exportPath.trim() : null,
           maxZoom,
@@ -426,6 +492,42 @@ function App() {
     }
   }
 
+  async function toggleMic() {
+    try {
+      const next = !micEnabled;
+      setMicEnabled(next);
+      await invoke("set_audio_config", {
+        config: {
+          systemAudioEnabled: appAudioEnabled,
+          micEnabled: next,
+          systemAudioGain: 1.0,
+          micGain: 1.0,
+        } satisfies AudioConfig,
+      });
+    } catch {
+      // Revert on error.
+      setMicEnabled((prev) => !prev);
+    }
+  }
+
+  async function toggleAppAudio() {
+    try {
+      const next = !appAudioEnabled;
+      setAppAudioEnabled(next);
+      await invoke("set_audio_config", {
+        config: {
+          systemAudioEnabled: next,
+          micEnabled: micEnabled,
+          systemAudioGain: 1.0,
+          micGain: 1.0,
+        } satisfies AudioConfig,
+      });
+    } catch {
+      // Revert on error.
+      setAppAudioEnabled((prev) => !prev);
+    }
+  }
+
   async function startNewRecordingFlow() {
     if (windowLabel === "editor") {
       const mainWindow = await WebviewWindow.getByLabel("main");
@@ -441,6 +543,7 @@ function App() {
     setView("launcher");
     setLastExport(null);
     setPreviewUrl(null);
+    setCursorTrack([]);
     setCurrentTimeMs(0);
     setPreviewDurationMs(0);
     setIsPlayingPreview(false);
@@ -456,8 +559,8 @@ function App() {
   }
 
   function togglePreviewPlayback() {
-    if (!previewUrl) {
-      setMessage("Export once to load a real video preview.");
+    if (!previewUrl && sessionDurationMs <= 0) {
+      setMessage("No recorded session is loaded yet.");
       return;
     }
 
@@ -532,8 +635,8 @@ function App() {
         onCycleDisplaySelection={cycleDisplaySelection}
         onSetFps={setFps}
         onToggleCamera={() => setCameraEnabled((prev) => !prev)}
-        onToggleMic={() => setMicEnabled((prev) => !prev)}
-        onToggleAppAudio={() => setAppAudioEnabled((prev) => !prev)}
+        onToggleMic={() => void toggleMic()}
+        onToggleAppAudio={() => void toggleAppAudio()}
         onOpenEditor={() => void openEditorWindow()}
         onStartRecording={() => void startRecording()}
         onStopRecording={() => void stopRecording()}
@@ -549,6 +652,7 @@ function App() {
       <EditorHeader
         isExporting={isExporting}
         recording={recording}
+        sessionFolder={lastSession?.sessionFolder ?? null}
         onStartNewRecordingFlow={() => void startNewRecordingFlow()}
         onInitializeGpuRenderer={() => void initializeGpuRenderer()}
         onGenerateZoomPreview={() => void generateZoomPreview()}
@@ -559,12 +663,20 @@ function App() {
         <EditorPreview
           backgroundStyle={backgroundStyle}
           currentTimeMs={currentTimeMs}
+          cursorTrack={cursorTrack}
           gpuStatus={gpuStatus}
           isPlaying={isPlayingPreview}
           previewUrl={previewUrl}
           sessionDurationMs={sessionDurationMs}
           status={status}
           scalePercent={scalePercent}
+          trimEndMs={trimEndMs}
+          trimStartMs={trimStartMs}
+          zoomInMs={zoomInMs}
+          zoomMarkers={zoomMarkers}
+          zoomOutMs={zoomOutMs}
+          maxZoom={maxZoom}
+          holdMs={holdMs}
           onDurationChange={setPreviewDurationMs}
           onSeekBy={seekPreviewBy}
           onTimeChange={setCurrentTimeMs}

@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 src-tauri/exports/
+src-tauri/sessions/
 
 # Editor directories and files
 .vscode/*
