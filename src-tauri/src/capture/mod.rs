@@ -83,6 +83,15 @@ pub struct FrameMetadata {
     pub click_in_frame: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewFrameResponse {
+    pub timestamp_ms: u128,
+    pub width: u32,
+    pub height: u32,
+    pub pixels_rgba: Vec<u8>,
+}
+
 // ── Raw frame (stored in memory during recording) ────────────────────────────
 
 #[derive(Debug)]
@@ -224,12 +233,7 @@ pub fn capture_loop(
         let capture_result = if let Some(active_region) = &region {
             let local_x = active_region.x - capture_screen.display_info.x;
             let local_y = active_region.y - capture_screen.display_info.y;
-            capture_screen.capture_area(
-                local_x,
-                local_y,
-                active_region.width,
-                active_region.height,
-            )
+            capture_screen.capture_area(local_x, local_y, active_region.width, active_region.height)
         } else {
             capture_screen.capture()
         };

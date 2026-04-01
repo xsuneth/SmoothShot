@@ -105,8 +105,8 @@ pub fn zoom_from_click(
     let zoom_span = profile.max_zoom - min_zoom;
 
     if frame_timestamp_ms <= zoom_in_end {
-        let in_progress = (frame_timestamp_ms - click_timestamp_ms) as f32
-            / profile.zoom_in_ms.max(1) as f32;
+        let in_progress =
+            (frame_timestamp_ms - click_timestamp_ms) as f32 / profile.zoom_in_ms.max(1) as f32;
         return Some(min_zoom + zoom_span * ease_in_out_sine(in_progress.clamp(0.0, 1.0)));
     }
 
@@ -114,7 +114,6 @@ pub fn zoom_from_click(
         return Some(profile.max_zoom);
     }
 
-    let out_progress =
-        (frame_timestamp_ms - hold_end) as f32 / profile.zoom_out_ms.max(1) as f32;
+    let out_progress = (frame_timestamp_ms - hold_end) as f32 / profile.zoom_out_ms.max(1) as f32;
     Some(profile.max_zoom - zoom_span * ease_in_out_sine(out_progress.clamp(0.0, 1.0)))
 }

@@ -13,17 +13,17 @@ use screenshots::Screen;
 use crate::app::state::AppState;
 use crate::audio::{AudioConfig, AudioStatus};
 use crate::capture::{
-    ClickEvent, DisplayDescriptor, FrameMetadata, RecordingStatus, SessionCaptureConfig,
-    StartRecordingRequest, StopRecordingResponse, build_frame_metadata, capture_loop,
-    resolve_capture_screen,
+    build_frame_metadata, capture_loop, resolve_capture_screen, ClickEvent, DisplayDescriptor,
+    FrameMetadata, PreviewFrameResponse, RecordingStatus, SessionCaptureConfig, StartRecordingRequest,
+    StopRecordingResponse,
 };
-use crate::export::exporter::{ExportRecordingRequest, ExportRecordingResponse, export_recording};
-use crate::preview::preview_session::{GeneratePreviewProxyResponse, generate_proxy};
+use crate::export::exporter::{export_recording, ExportRecordingRequest, ExportRecordingResponse};
+use crate::preview::preview_session::{generate_proxy, GeneratePreviewProxyResponse};
 use crate::project::persistence::persist_session;
 use crate::project::project_model::{CursorEventRecord, ProjectFile};
-use crate::render::compositor::{GpuInitStatus, init_gpu};
+use crate::render::compositor::{init_gpu, GpuInitStatus};
 use crate::timeline::zoom_track::{
-    ZoomPreviewRequest, ZoomPreviewResponse, ZoomTransformFrame, zoom_from_click,
+    zoom_from_click, ZoomPreviewRequest, ZoomPreviewResponse, ZoomTransformFrame,
 };
 
 // ── Recording commands ────────────────────────────────────────────────────────
@@ -195,8 +195,12 @@ pub fn stop_recording(state: tauri::State<'_, AppState>) -> Result<StopRecording
         click_events_file: "click_events.json".to_string(),
     };
 
-    let session_folder = persist_session(epoch, &project, &click_events_for_disk, &cursor_events)
-        .ok();
+    let session_folder = Some(persist_session(
+        epoch,
+        &project,
+        &click_events_for_disk,
+        &cursor_events,
+    )?);
 
     recorder.session_folder = session_folder.clone();
     recorder.proxy_path = None;
@@ -320,25 +324,15 @@ pub fn get_frame_timeline(
     ))
 }
 
-// ── Preview command ───────────────────────────────────────────────────────────
-
 #[tauri::command]
-pub fn generate_preview_proxy(
+pub fn get_preview_frame(
     state: tauri::State<'_, AppState>,
-) -> Result<GeneratePreviewProxyResponse, String> {
-    let mut recorder = state
+    time_ms: Option<u128>,
+) -> Result<Option<PreviewFrameResponse>, String> {
+    let recorder = state
         .recorder
         .lock()
         .map_err(|_| "failed to lock recorder state".to_string())?;
-
-    if recorder.is_recording {
-        return Err("stop recording before generating preview proxy".to_string());
-    }
-
-    let session_folder = recorder
-        .session_folder
-        .clone()
-        .ok_or_else(|| "no session folder available – start and stop a recording first".to_string())?;
 
     let frames = recorder
         .raw_frames
@@ -346,31 +340,101 @@ pub fn generate_preview_proxy(
         .map_err(|_| "failed to lock frame buffer".to_string())?;
 
     if frames.is_empty() {
+        return Ok(None);
+    }
+
+    let target_time = time_ms.unwrap_or_else(|| frames.last().map(|frame| frame.timestamp_ms).unwrap_or(0));
+    let mut best_index = 0usize;
+    let mut best_distance = u128::MAX;
+
+    for (index, frame) in frames.iter().enumerate() {
+        let distance = frame.timestamp_ms.abs_diff(target_time);
+        if distance < best_distance {
+            best_distance = distance;
+            best_index = index;
+        }
+    }
+
+    let frame = &frames[best_index];
+
+    Ok(Some(PreviewFrameResponse {
+        timestamp_ms: frame.timestamp_ms,
+        width: frame.width,
+        height: frame.height,
+        pixels_rgba: frame.pixels_rgba.clone(),
+    }))
+}
+
+// ── Preview command ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn generate_preview_proxy(
+    state: tauri::State<'_, AppState>,
+) -> Result<GeneratePreviewProxyResponse, String> {
+    let (
+        raw_frames,
+        click_events_store,
+        session_capture,
+        target_fps,
+        session_duration_ms,
+        session_folder,
+    ) = {
+        let recorder = state
+            .recorder
+            .lock()
+            .map_err(|_| "failed to lock recorder state".to_string())?;
+
+        if recorder.is_recording {
+            return Err("stop recording before generating preview proxy".to_string());
+        }
+
+        let session_folder = recorder.session_folder.clone().ok_or_else(|| {
+            "no session folder available – start and stop a recording first".to_string()
+        })?;
+
+        let session_capture = recorder
+            .session_capture
+            .clone()
+            .ok_or_else(|| "missing session capture metadata".to_string())?;
+
+        (
+            recorder.raw_frames.clone(),
+            recorder.click_events.clone(),
+            session_capture,
+            recorder.target_fps,
+            recorder.last_session_duration_ms,
+            session_folder,
+        )
+    };
+
+    let frames_guard = raw_frames
+        .lock()
+        .map_err(|_| "failed to lock frame buffer".to_string())?;
+
+    if frames_guard.is_empty() {
         return Err("no captured frames available for proxy generation".to_string());
     }
 
-    let click_events = recorder
-        .click_events
+    let click_events = click_events_store
         .lock()
         .map_err(|_| "failed to lock click events".to_string())?
         .clone();
 
-    let session_capture = recorder
-        .session_capture
-        .clone()
-        .ok_or_else(|| "missing session capture metadata".to_string())?;
-
     let result = generate_proxy(
-        &frames,
+        &frames_guard,
         &click_events,
         &session_capture,
-        recorder.target_fps,
-        recorder.last_session_duration_ms,
+        target_fps,
+        session_duration_ms,
         &session_folder,
     )?;
 
-    // Store the proxy path so subsequent get_last_session_summary includes it.
-    drop(frames);
+    drop(frames_guard);
+
+    let mut recorder = state
+        .recorder
+        .lock()
+        .map_err(|_| "failed to lock recorder state".to_string())?;
     recorder.proxy_path = Some(result.proxy_path.clone());
 
     Ok(result)
@@ -379,9 +443,7 @@ pub fn generate_preview_proxy(
 // ── GPU command ───────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn initialize_gpu_renderer(
-    state: tauri::State<'_, AppState>,
-) -> Result<GpuInitStatus, String> {
+pub fn initialize_gpu_renderer(state: tauri::State<'_, AppState>) -> Result<GpuInitStatus, String> {
     let status = init_gpu()?;
 
     let mut gpu_renderer = state

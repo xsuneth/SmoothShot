@@ -81,8 +81,7 @@ pub fn apply_zoom_transform_rgba(
 
             let src_offset = ((sy as usize * width_usize) + sx as usize) * 4;
             let dst_offset = ((y * width_usize) + x) * 4;
-            output[dst_offset..dst_offset + 4]
-                .copy_from_slice(&source[src_offset..src_offset + 4]);
+            output[dst_offset..dst_offset + 4].copy_from_slice(&source[src_offset..src_offset + 4]);
         }
     }
 
@@ -263,9 +262,7 @@ pub fn draw_cursor_overlay_rgba(
 
         let progress = (timestamp_ms - *click_time) as f32 / 340.0;
         let radius = (12.0 + (20.0 * progress)).round() as i32;
-        let alpha = (220.0 * (1.0 - progress))
-            .round()
-            .clamp(0.0, 255.0) as u8;
+        let alpha = (220.0 * (1.0 - progress)).round().clamp(0.0, 255.0) as u8;
         draw_ring_rgba(
             pixels,
             width,

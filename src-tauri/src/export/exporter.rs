@@ -10,13 +10,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::capture::global_to_frame_coords;
 use crate::capture::{ClickEvent, RawFrame, SessionCaptureConfig};
 use crate::export::ffmpeg_sidecar::resolve_ffmpeg;
 use crate::render::compositor::{
     apply_zoom_transform_rgba, blend_frames_rgba, draw_cursor_overlay_rgba, map_point_through_zoom,
 };
 use crate::timeline::zoom_track::{zoom_from_click, ZoomProfile};
-use crate::capture::global_to_frame_coords;
 
 // ── Request / response ────────────────────────────────────────────────────────
 
@@ -39,6 +39,12 @@ pub struct ExportRecordingResponse {
     pub height: u32,
     pub target_fps: u32,
     pub output_duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    pub apply_zoom: bool,
+    pub draw_cursor: bool,
 }
 
 // ── Frame sampling ────────────────────────────────────────────────────────────
@@ -65,10 +71,8 @@ pub fn build_export_frame_samples(
         .last()
         .map(|frame| frame.timestamp_ms as f64)
         .unwrap_or_default();
-    let effective_duration_ms =
-        total_duration_ms.max(last_frame_timestamp_ms as u128) as f64;
-    let output_len =
-        ((effective_duration_ms / interval_ms).floor() as usize).saturating_add(1);
+    let effective_duration_ms = total_duration_ms.max(last_frame_timestamp_ms as u128) as f64;
+    let output_len = ((effective_duration_ms / interval_ms).floor() as usize).saturating_add(1);
 
     let mut samples = Vec::with_capacity(output_len.max(frames.len()));
     let mut source_idx = 0usize;
@@ -146,6 +150,7 @@ pub fn run_export(
     target_fps: u32,
     session_duration_ms: u128,
     profile: &ZoomProfile,
+    render_options: RenderOptions,
     output_path: &PathBuf,
     output_scale: &str,
     preset: &str,
@@ -215,16 +220,23 @@ pub fn run_export(
             + right_frame.cursor_y as f32 * sample.blend)
             .round() as i32;
 
-        let source_pixels =
-            blend_frames_rgba(&left_frame.pixels_rgba, &right_frame.pixels_rgba, sample.blend);
-
-        let (zoom, focus_x_global, focus_y_global) = best_zoom_and_focus(
-            sample.timestamp_ms,
-            blended_cursor_x,
-            blended_cursor_y,
-            click_events,
-            profile,
+        let source_pixels = blend_frames_rgba(
+            &left_frame.pixels_rgba,
+            &right_frame.pixels_rgba,
+            sample.blend,
         );
+
+        let (zoom, focus_x_global, focus_y_global) = if render_options.apply_zoom {
+            best_zoom_and_focus(
+                sample.timestamp_ms,
+                blended_cursor_x,
+                blended_cursor_y,
+                click_events,
+                profile,
+            )
+        } else {
+            (1.0, blended_cursor_x, blended_cursor_y)
+        };
 
         let (focus_x_local, focus_y_local) =
             global_to_frame_coords(focus_x_global, focus_y_global, session_capture);
@@ -266,15 +278,17 @@ pub fn run_export(
             })
             .collect();
 
-        draw_cursor_overlay_rgba(
-            &mut transformed,
-            left_frame.width,
-            left_frame.height,
-            cursor_mapped_x,
-            cursor_mapped_y,
-            sample.timestamp_ms,
-            &mapped_clicks,
-        );
+        if render_options.draw_cursor {
+            draw_cursor_overlay_rgba(
+                &mut transformed,
+                left_frame.width,
+                left_frame.height,
+                cursor_mapped_x,
+                cursor_mapped_y,
+                sample.timestamp_ms,
+                &mapped_clicks,
+            );
+        }
 
         stdin
             .write_all(&transformed)
@@ -334,6 +348,10 @@ pub fn export_recording(
         target_fps,
         session_duration_ms,
         &profile,
+        RenderOptions {
+            apply_zoom: true,
+            draw_cursor: true,
+        },
         &output_path,
         "1920:1080",
         "veryfast",

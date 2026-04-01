@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::capture::{ClickEvent, RawFrame, SessionCaptureConfig};
-use crate::export::exporter::run_export;
+use crate::export::exporter::{run_export, RenderOptions};
 use crate::timeline::zoom_track::ZoomProfile;
 
 // ── Response ──────────────────────────────────────────────────────────────────
@@ -64,6 +64,10 @@ pub fn generate_proxy(
         target_fps,
         session_duration_ms,
         &profile,
+        RenderOptions {
+            apply_zoom: false,
+            draw_cursor: false,
+        },
         &proxy_path,
         "1280:720",
         "ultrafast",
@@ -80,5 +84,3 @@ pub fn generate_proxy(
         target_fps: fps,
     })
 }
-
-

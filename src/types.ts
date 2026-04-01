@@ -87,6 +87,8 @@ export type ZoomMarker = {
   id: string;
   label: string;
   timeMs: number;
+  cursorX: number;
+  cursorY: number;
 };
 
 export type BackgroundTab = "wallpaper" | "gradient" | "color" | "image";
@@ -103,6 +105,24 @@ export type GeneratePreviewProxyResponse = {
   width: number;
   height: number;
   targetFps: number;
+};
+
+export type FrameMetadata = {
+  frameIndex: number;
+  timestampMs: number;
+  width: number;
+  height: number;
+  rawBytes: number;
+  cursorX: number;
+  cursorY: number;
+  clickInFrame: boolean;
+};
+
+export type PreviewFrameResponse = {
+  timestampMs: number;
+  width: number;
+  height: number;
+  pixelsRgba: number[];
 };
 
 export type AudioStatus = {

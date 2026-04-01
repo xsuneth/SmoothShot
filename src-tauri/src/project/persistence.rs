@@ -21,18 +21,20 @@ pub fn session_folder_path(epoch: u64) -> PathBuf {
 /// Create (or confirm the existence of) the session folder.
 pub fn create_session_folder(epoch: u64) -> Result<PathBuf, String> {
     let folder = session_folder_path(epoch);
-    fs::create_dir_all(&folder)
-        .map_err(|err| format!("failed to create session folder: {err}"))?;
+    fs::create_dir_all(&folder).map_err(|err| format!("failed to create session folder: {err}"))?;
     Ok(folder)
 }
 
 /// Serialise a value and write it to a JSON file inside `folder`.
-fn write_json<T: Serialize>(folder: &Path, file_name: &str, value: &T) -> Result<(), String> {
+fn write_json<T: Serialize + ?Sized>(
+    folder: &Path,
+    file_name: &str,
+    value: &T,
+) -> Result<(), String> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|err| format!("failed to serialise {file_name}: {err}"))?;
     let path = folder.join(file_name);
-    fs::write(&path, json)
-        .map_err(|err| format!("failed to write {file_name}: {err}"))?;
+    fs::write(&path, json).map_err(|err| format!("failed to write {file_name}: {err}"))?;
     Ok(())
 }
 

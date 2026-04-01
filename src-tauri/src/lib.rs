@@ -22,7 +22,7 @@ pub mod timeline;
 
 use app::commands::{
     build_zoom_preview, export_recording_cmd, generate_preview_proxy, get_audio_status,
-    get_click_timeline, get_frame_timeline, get_last_session_summary, get_recording_status,
+    get_click_timeline, get_frame_timeline, get_last_session_summary, get_preview_frame, get_recording_status,
     initialize_gpu_renderer, list_displays, set_audio_config, start_recording, stop_recording,
 };
 
@@ -39,6 +39,7 @@ pub fn run() {
             get_click_timeline,
             get_last_session_summary,
             get_frame_timeline,
+            get_preview_frame,
             initialize_gpu_renderer,
             build_zoom_preview,
             export_recording_cmd,

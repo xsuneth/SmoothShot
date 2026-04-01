@@ -18,8 +18,8 @@ use std::process::{Command, Stdio};
 /// Returns the path if found, or an error string if FFmpeg is unavailable.
 pub fn resolve_ffmpeg() -> Result<PathBuf, String> {
     // 1. Check for a bundled sidecar next to the executable.
-    if let Ok(exe_dir) = std::env::current_exe()
-        .map(|p| p.parent().map(|d| d.to_path_buf()).unwrap_or_default())
+    if let Ok(exe_dir) =
+        std::env::current_exe().map(|p| p.parent().map(|d| d.to_path_buf()).unwrap_or_default())
     {
         let sidecar_name = if cfg!(windows) {
             "ffmpeg.exe"

@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use crate::audio::AudioConfig;
 use crate::capture::{ClickEvent, RawFrame, SessionCaptureConfig};
-use crate::render::compositor::GpuInitStatus;
 
 // ── GPU renderer state ────────────────────────────────────────────────────────
 
