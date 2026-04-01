@@ -1,217 +1,26 @@
+mod app;
+mod project;
+mod render;
+
+use app::state::{
+    AppState, CaptureRegion, ClickEvent, DisplayDescriptor, ExportFrameSample,
+    ExportRecordingRequest, ExportRecordingResponse, FrameMetadata, RawFrame, RecorderInner,
+    RecordingStatus, SessionCaptureConfig, StartRecordingRequest, StopRecordingResponse,
+    ZoomPreviewRequest, ZoomPreviewResponse, ZoomProfile, ZoomTransformFrame,
+};
+use render::compositor::{backend_name, GpuInitStatus};
+
 use device_query::{DeviceQuery, DeviceState};
 use pollster::block_on;
 use screenshots::Screen;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureRegion {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StartRecordingRequest {
-    fps: Option<u32>,
-    region: Option<CaptureRegion>,
-    display_index: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FrameMetadata {
-    frame_index: u64,
-    timestamp_ms: u128,
-    width: u32,
-    height: u32,
-    raw_bytes: usize,
-    cursor_x: i32,
-    cursor_y: i32,
-    click_in_frame: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClickEvent {
-    timestamp_ms: u128,
-    cursor_x: i32,
-    cursor_y: i32,
-    button: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ZoomTransformFrame {
-    frame_index: u64,
-    timestamp_ms: u128,
-    zoom: f32,
-    focus_x: i32,
-    focus_y: i32,
-    click_driven: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ZoomProfile {
-    zoom_in_ms: u128,
-    hold_ms: u128,
-    zoom_out_ms: u128,
-    max_zoom: f32,
-    easing: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ZoomPreviewResponse {
-    frames: Vec<ZoomTransformFrame>,
-    click_count: usize,
-    profile: ZoomProfile,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ZoomPreviewRequest {
-    limit: Option<usize>,
-    zoom_in_ms: Option<u128>,
-    hold_ms: Option<u128>,
-    zoom_out_ms: Option<u128>,
-    max_zoom: Option<f32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GpuInitStatus {
-    initialized: bool,
-    adapter_name: Option<String>,
-    backend: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DisplayDescriptor {
-    index: usize,
-    id: u32,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    is_primary: bool,
-    scale_factor: f32,
-    frequency: f32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportRecordingRequest {
-    output_path: Option<String>,
-    max_zoom: Option<f32>,
-    zoom_in_ms: Option<u128>,
-    hold_ms: Option<u128>,
-    zoom_out_ms: Option<u128>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportRecordingResponse {
-    output_path: String,
-    frames_exported: usize,
-    width: u32,
-    height: u32,
-    target_fps: u32,
-    output_duration_ms: u128,
-}
-
-#[derive(Debug, Clone)]
-struct SessionCaptureConfig {
-    display_origin_x: i32,
-    display_origin_y: i32,
-    region: Option<CaptureRegion>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ExportFrameSample {
-    left_index: usize,
-    right_index: usize,
-    blend: f32,
-    timestamp_ms: u128,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RecordingStatus {
-    is_recording: bool,
-    target_fps: u32,
-    frames_captured: usize,
-    clicks_detected: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StopRecordingResponse {
-    target_fps: u32,
-    duration_ms: u128,
-    frames_captured: usize,
-    clicks_detected: usize,
-}
-
-#[derive(Debug)]
-struct RawFrame {
-    timestamp_ms: u128,
-    width: u32,
-    height: u32,
-    cursor_x: i32,
-    cursor_y: i32,
-    pixels_rgba: Vec<u8>,
-}
-
-#[derive(Debug, Default)]
-struct GpuRendererState {
-    initialized: bool,
-    adapter_name: Option<String>,
-    backend: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct RecorderInner {
-    is_recording: bool,
-    target_fps: u32,
-    started_at: Option<Instant>,
-    last_session_duration_ms: u128,
-    session_capture: Option<SessionCaptureConfig>,
-    stop_signal: Option<Arc<AtomicBool>>,
-    handle: Option<JoinHandle<()>>,
-    raw_frames: Arc<Mutex<Vec<RawFrame>>>,
-    click_events: Arc<Mutex<Vec<ClickEvent>>>,
-}
-
-#[derive(Default)]
-struct AppState {
-    recorder: Mutex<RecorderInner>,
-    gpu_renderer: Mutex<GpuRendererState>,
-}
-
-fn backend_name(backend: wgpu::Backend) -> String {
-    match backend {
-        wgpu::Backend::Vulkan => "vulkan".to_string(),
-        wgpu::Backend::Metal => "metal".to_string(),
-        wgpu::Backend::Dx12 => "dx12".to_string(),
-        wgpu::Backend::Gl => "opengl".to_string(),
-        wgpu::Backend::BrowserWebGpu => "webgpu".to_string(),
-        wgpu::Backend::Noop => "noop".to_string(),
-    }
-}
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn ease_in_out_sine(progress: f32) -> f32 {
     -((std::f32::consts::PI * progress).cos() - 1.0) / 2.0
