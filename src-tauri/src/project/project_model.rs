@@ -29,6 +29,8 @@ pub struct ProjectFile {
     pub clicks_detected: usize,
     pub source_width: u32,
     pub source_height: u32,
+    /// Relative path to the captured source video inside the session folder, if available.
+    pub source_video: Option<String>,
     /// Relative path to proxy MP4 inside the session folder, if generated.
     pub proxy_video: Option<String>,
     /// Relative file name for cursor events.

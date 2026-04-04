@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { LogicalPosition } from "@tauri-apps/api/dpi";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { LogicalPosition, LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
+import { Menu } from "@tauri-apps/api/menu";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
 
 import { EditorHeader } from "./components/EditorHeader";
+import { DisplayPickerWindow } from "./components/DisplayPickerWindow";
 import { EditorInspector } from "./components/EditorInspector";
 import { EditorPreview } from "./components/EditorPreview";
 import { ExportResult } from "./components/ExportResult";
@@ -20,8 +22,8 @@ import type {
   DisplayDescriptor,
   ExportRecordingResponse,
   FrameMetadata,
-  GeneratePreviewProxyResponse,
   GpuInitStatus,
+  InputDeviceOption,
   LauncherMode,
   RecordingStatus,
   StopRecordingResponse,
@@ -29,23 +31,69 @@ import type {
   ZoomPreviewResponse,
 } from "./types";
 
+function getWindowHintFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const hint = params.get("window");
+  if (hint === "main" || hint === "editor" || hint === "display-picker") {
+    return hint;
+  }
+
+  return null;
+}
+
 function detectWindowLabel() {
+  const hintedLabel = getWindowHintFromUrl();
+  if (hintedLabel) {
+    return hintedLabel;
+  }
+
   try {
     return getCurrentWebviewWindow().label;
   } catch {
-    return "main";
+    try {
+      return getCurrentWindow().label;
+    } catch {
+      return "main";
+    }
   }
 }
 
 function initialViewForWindow(label: string): AppView {
-  return label === "editor" ? "editor" : "launcher";
+  if (label === "editor") {
+    return "editor";
+  }
+
+  if (label === "display-picker") {
+    return "displayPicker";
+  }
+
+  return "launcher";
+}
+
+const DISPLAY_PICKER_GAP = 4;
+const DISPLAY_CARD_WIDTH = 240;
+const DISPLAY_CARD_HEIGHT = 92;
+const DISPLAY_PICKER_GRID_GAP = 12;
+const DISPLAY_PICKER_FRAME_WIDTH = 24;
+const DISPLAY_PICKER_FRAME_HEIGHT = 24;
+
+function getDisplayPickerSize(displayCount: number) {
+  const safeCount = Math.max(displayCount, 1);
+  const columns = safeCount === 1 ? 1 : 2;
+  const rows = Math.max(1, Math.ceil(safeCount / 2));
+  return {
+    width: columns * DISPLAY_CARD_WIDTH + (columns - 1) * DISPLAY_PICKER_GRID_GAP + DISPLAY_PICKER_FRAME_WIDTH,
+    height: rows * DISPLAY_CARD_HEIGHT + (rows - 1) * DISPLAY_PICKER_GRID_GAP + DISPLAY_PICKER_FRAME_HEIGHT,
+  };
 }
 
 function App() {
   const [windowLabel] = useState(() => detectWindowLabel());
   const [view, setView] = useState<AppView>(() => initialViewForWindow(windowLabel));
-  const [launcherMode, setLauncherMode] = useState<LauncherMode>("display");
+  const [launcherMode, setLauncherMode] = useState<LauncherMode | null>(null);
   const [recording, setRecording] = useState(false);
+  const [launcherVisible, setLauncherVisible] = useState(false);
+  const [isDisplayPickerOpen, setIsDisplayPickerOpen] = useState(false);
   const [status, setStatus] = useState<RecordingStatus>({
     isRecording: false,
     targetFps: 60,
@@ -59,16 +107,16 @@ function App() {
   const [lastExport, setLastExport] = useState<ExportRecordingResponse | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [displays, setDisplays] = useState<DisplayDescriptor[]>([]);
-  const [displaySelection, setDisplaySelection] = useState("auto");
+  const [displayPickerLoading, setDisplayPickerLoading] = useState(false);
+  const [displaySelection, setDisplaySelection] = useState("");
   const [message, setMessage] = useState("");
-  const [fps, setFps] = useState(60);
+  const [fps] = useState(60);
   const [isExporting, setIsExporting] = useState(false);
   const [exportPath, setExportPath] = useState("");
   const [maxZoom, setMaxZoom] = useState(1.85);
   const [zoomInMs, setZoomInMs] = useState(180);
   const [holdMs, setHoldMs] = useState(120);
   const [zoomOutMs, setZoomOutMs] = useState(260);
-  const [regionEnabled, setRegionEnabled] = useState(false);
   const [region] = useState<CaptureRegion>({
     x: 100,
     y: 100,
@@ -78,6 +126,10 @@ function App() {
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [micEnabled, setMicEnabled] = useState(false);
   const [appAudioEnabled, setAppAudioEnabled] = useState(true);
+  const [cameraDevices, setCameraDevices] = useState<InputDeviceOption[]>([]);
+  const [microphoneDevices, setMicrophoneDevices] = useState<InputDeviceOption[]>([]);
+  const [selectedCameraDevice, setSelectedCameraDevice] = useState<string | null>(null);
+  const [selectedMicrophoneDevice, setSelectedMicrophoneDevice] = useState<string | null>(null);
   const [trimStartMs, setTrimStartMs] = useState(0);
   const [trimEndMs, setTrimEndMs] = useState(0);
   const [padding, setPadding] = useState(32);
@@ -91,22 +143,26 @@ function App() {
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [previewDurationMs, setPreviewDurationMs] = useState(0);
   const [isPlayingPreview, setIsPlayingPreview] = useState(false);
+  const [isMutedPreview, setIsMutedPreview] = useState(false);
+  const [micInputLevel, setMicInputLevel] = useState(0);
   const [zoomMarkers, setZoomMarkers] = useState<ZoomMarker[]>([]);
   const [cursorTrack, setCursorTrack] = useState<FrameMetadata[]>([]);
   const [backgroundImageFileName, setBackgroundImageFileName] = useState("");
 
   const sessionDurationMs = Math.max(lastSession?.durationMs ?? 0, previewDurationMs);
-  const canOpenEditor = Boolean(lastSession) || status.framesCaptured > 0;
   const selectedDisplay = displays.find((display) => String(display.index) === displaySelection);
   const selectedDisplayLabel =
-    displaySelection === "auto"
-      ? "Auto display"
-      : selectedDisplay
-        ? `${selectedDisplay.isPrimary ? "Primary" : `Display ${selectedDisplay.index + 1}`} ${selectedDisplay.width}x${selectedDisplay.height}`
-        : "Selected display";
+    selectedDisplay
+      ? `${selectedDisplay.isPrimary ? "Primary" : `Display ${selectedDisplay.index + 1}`} ${selectedDisplay.width}x${selectedDisplay.height}`
+      : "Display not selected";
+  const selectedCameraLabel =
+    cameraDevices.find((device) => device.id === selectedCameraDevice)?.name ?? cameraDevices[0]?.name ?? "Camera";
+  const selectedMicrophoneLabel =
+    microphoneDevices.find((device) => device.id === selectedMicrophoneDevice)?.name ?? microphoneDevices[0]?.name ?? "Microphone";
 
   useEffect(() => {
     void loadDisplays();
+    void loadInputDevices();
 
     const timer = window.setInterval(async () => {
       try {
@@ -120,6 +176,25 @@ function App() {
 
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (windowLabel !== "main") {
+      return;
+    }
+
+    let unlistenMic: (() => void) | undefined;
+    void getCurrentWebviewWindow()
+      .listen<number>("mic-level", (event) => {
+        setMicInputLevel(Math.min(1, Math.max(0, Number(event.payload) || 0)));
+      })
+      .then((dispose) => {
+        unlistenMic = dispose;
+      });
+
+    return () => {
+      unlistenMic?.();
+    };
+  }, [windowLabel]);
 
   useEffect(() => {
     if (windowLabel !== "editor") {
@@ -152,12 +227,108 @@ function App() {
       return;
     }
 
-    void positionLauncherBar();
+    void showLauncherWindow(true);
   }, [windowLabel]);
 
   useEffect(() => {
-    setRegionEnabled(launcherMode === "area");
-  }, [launcherMode]);
+    if (windowLabel !== "main") {
+      return;
+    }
+
+    let unlistenSelect: (() => void) | undefined;
+    let unlistenRecord: (() => void) | undefined;
+    let unlistenMoved: (() => void) | undefined;
+    let unlistenClosed: (() => void) | undefined;
+
+    void getCurrentWebviewWindow()
+      .listen<string>("smoothshot:display-picker-select", async (event) => {
+        selectDisplaySelection(event.payload);
+        const popup = await WebviewWindow.getByLabel("display-picker");
+        if (popup) {
+          await popup.hide();
+        }
+        setIsDisplayPickerOpen(false);
+      })
+      .then((dispose) => {
+        unlistenSelect = dispose;
+      });
+
+    void getCurrentWebviewWindow()
+      .listen<string>("smoothshot:display-picker-record", async (event) => {
+        selectDisplaySelection(event.payload);
+        setLauncherMode("display");
+        const popup = await WebviewWindow.getByLabel("display-picker");
+        if (popup) {
+          await popup.hide();
+        }
+        setIsDisplayPickerOpen(false);
+        await startRecording();
+      })
+      .then((dispose) => {
+        unlistenRecord = dispose;
+      });
+
+    void getCurrentWebviewWindow()
+      .listen("smoothshot:display-picker-closed", () => {
+        setIsDisplayPickerOpen(false);
+      })
+      .then((dispose) => {
+        unlistenClosed = dispose;
+      });
+
+    void getCurrentWindow()
+      .onMoved(async () => {
+        await hideDisplayPopup();
+      })
+      .then((dispose) => {
+        unlistenMoved = dispose;
+      });
+
+    return () => {
+      unlistenSelect?.();
+      unlistenRecord?.();
+      unlistenMoved?.();
+      unlistenClosed?.();
+    };
+  }, [windowLabel, displays, displaySelection, fps, launcherMode]);
+
+  useEffect(() => {
+    if (windowLabel !== "display-picker") {
+      return;
+    }
+
+    let unlisten: (() => void) | undefined;
+    let unlistenFocus: (() => void) | undefined;
+    void getCurrentWebviewWindow()
+      .listen<{ displaySelection: string; displays: DisplayDescriptor[]; isLoading: boolean }>("smoothshot:display-picker-data", (event) => {
+        setDisplaySelection(event.payload.displaySelection);
+        setDisplays(event.payload.displays);
+        setDisplayPickerLoading(event.payload.isLoading);
+      })
+      .then((dispose) => {
+        unlisten = dispose;
+      });
+
+    void getCurrentWindow()
+      .onFocusChanged(async ({ payload: focused }) => {
+        if (!focused) {
+          await getCurrentWindow().hide().catch(() => {
+            // Ignore popup hide failures.
+          });
+          await getCurrentWebviewWindow().emitTo("main", "smoothshot:display-picker-closed").catch(() => {
+            // Ignore close sync failures.
+          });
+        }
+      })
+      .then((dispose) => {
+        unlistenFocus = dispose;
+      });
+
+    return () => {
+      unlisten?.();
+      unlistenFocus?.();
+    };
+  }, [windowLabel]);
 
   useEffect(() => {
     return () => {
@@ -194,22 +365,82 @@ function App() {
     return () => window.cancelAnimationFrame(frameId);
   }, [isPlayingPreview, previewUrl, sessionDurationMs]);
 
-  function clickEventsToMarkers(clicks: ClickEvent[]): ZoomMarker[] {
-    return clicks.slice(-8).map((event, index) => ({
-      id: `${event.timestampMs}-${index}`,
-      label: "Zoom",
-      timeMs: event.timestampMs,
-      cursorX: event.cursorX,
-      cursorY: event.cursorY,
-    }));
+  function clickEventsToMarkers(clicks: ClickEvent[], durationMs: number): ZoomMarker[] {
+    const leftClicks = clicks
+      .filter((event) => event.button === "left")
+      .sort((a, b) => a.timestampMs - b.timestampMs);
+    const doubleClickThresholdMs = 320;
+    const toggleMoments: number[] = [];
+
+    for (let index = 1; index < leftClicks.length; index += 1) {
+      const previous = leftClicks[index - 1];
+      const current = leftClicks[index];
+      if (current.timestampMs - previous.timestampMs <= doubleClickThresholdMs) {
+        toggleMoments.push(current.timestampMs);
+        index += 1;
+      }
+    }
+
+    const markers: ZoomMarker[] = [];
+    for (let index = 0; index < toggleMoments.length; index += 2) {
+      const startMs = toggleMoments[index];
+      const endMs = toggleMoments[index + 1] ?? durationMs;
+      if (endMs <= startMs) {
+        continue;
+      }
+
+      markers.push({
+        id: `zoom-range-${index}`,
+        label: "Zoom",
+        startMs,
+        endMs,
+      });
+    }
+
+    return markers;
+  }
+
+  function normalizeSessionTiming(clicks: ClickEvent[], frameTrack: FrameMetadata[]) {
+    const firstFrameTime = frameTrack[0]?.timestampMs ?? Number.POSITIVE_INFINITY;
+    const firstClickTime = clicks[0]?.timestampMs ?? Number.POSITIVE_INFINITY;
+    const zeroPoint = Math.min(firstFrameTime, firstClickTime);
+
+    if (!Number.isFinite(zeroPoint) || zeroPoint <= 0) {
+      return { clicks, frameTrack };
+    }
+
+    return {
+      clicks: clicks.map((event) => ({
+        ...event,
+        timestampMs: Math.max(0, event.timestampMs - zeroPoint),
+      })),
+      frameTrack: frameTrack.map((frame) => ({
+        ...frame,
+        timestampMs: Math.max(0, frame.timestampMs - zeroPoint),
+      })),
+    };
   }
 
   async function loadDisplays() {
+    setDisplayPickerLoading(true);
     try {
       const availableDisplays = await invoke<DisplayDescriptor[]>("list_displays");
       setDisplays(availableDisplays);
+      setDisplaySelection((previousSelection) => {
+        if (availableDisplays.some((display) => String(display.index) === previousSelection)) {
+          return previousSelection;
+        }
+
+        const firstDisplay = availableDisplays[0];
+        return firstDisplay ? String(firstDisplay.index) : "";
+      });
+      return availableDisplays;
     } catch {
       setDisplays([]);
+      setDisplaySelection("");
+      return [];
+    } finally {
+      setDisplayPickerLoading(false);
     }
   }
 
@@ -231,65 +462,117 @@ function App() {
       const height = windowSize.height / scale;
 
       const x = Math.round(monitorX + (monitorWidth - width) / 2);
-      const y = Math.round(monitorY + monitorHeight - height - 80);
+      const y = Math.round(monitorY + monitorHeight - height - 40);
       await win.setPosition(new LogicalPosition(x, y));
     } catch {
       // Ignore positioning failures and keep default placement.
     }
   }
 
+  async function loadInputDevices() {
+    try {
+      const [cameraNames, microphoneNames] = await Promise.all([
+        invoke<string[]>("list_camera_devices"),
+        invoke<string[]>("list_microphone_devices"),
+      ]);
+
+      const nextCameras = cameraNames.map((name) => ({ id: name, name }));
+      const nextMics = microphoneNames.map((name) => ({ id: name, name }));
+      setCameraDevices(nextCameras);
+      setMicrophoneDevices(nextMics);
+      setSelectedCameraDevice((prev) => prev ?? nextCameras[0]?.id ?? null);
+      setSelectedMicrophoneDevice((prev) => prev ?? nextMics[0]?.id ?? null);
+    } catch {
+      setCameraDevices([]);
+      setMicrophoneDevices([]);
+    }
+  }
+
+  async function showLauncherWindow(animate = false) {
+    if (windowLabel !== "main") {
+      return;
+    }
+
+    try {
+      const win = getCurrentWindow();
+      setLauncherVisible(false);
+      await positionLauncherBar();
+      await win.show();
+      if (animate) {
+        window.setTimeout(() => setLauncherVisible(true), 24);
+      } else {
+        setLauncherVisible(true);
+      }
+    } catch {
+      setLauncherVisible(true);
+    }
+  }
+
   async function hideLauncher() {
     try {
+      await hideDisplayPopup();
+      setLauncherVisible(false);
+      await new Promise((resolve) => window.setTimeout(resolve, 140));
       await getCurrentWindow().hide();
     } catch {
       // Ignore hide failures.
     }
   }
 
+  async function closeEditorWindow() {
+    try {
+      await getCurrentWindow().hide();
+    } catch {
+      // Ignore close failures.
+    }
+  }
+
+  async function minimizeEditorWindow() {
+    try {
+      await getCurrentWindow().minimize();
+    } catch {
+      // Ignore minimize failures.
+    }
+  }
+
   function selectLauncherMode(mode: LauncherMode) {
-    if (mode === "window" || mode === "device") {
+    if (mode === "window") {
       setMessage(`${mode} capture mode is planned next. Using display capture for now.`);
-      setLauncherMode("display");
       return;
     }
 
     setLauncherMode(mode);
   }
 
-  function cycleDisplaySelection() {
-    if (displays.length === 0) {
-      return;
-    }
-
-    const options = ["auto", ...displays.map((display) => String(display.index))];
-    const currentIndex = options.indexOf(displaySelection);
-    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % options.length : 0;
-    const nextSelection = options[nextIndex];
-    const nextDisplay = displays.find((display) => String(display.index) === nextSelection);
+  function selectDisplaySelection(selection: string) {
+    const nextDisplay = displays.find((display) => String(display.index) === selection);
     const nextLabel =
-      nextSelection === "auto"
-        ? "Auto display"
-        : nextDisplay
-          ? `${nextDisplay.isPrimary ? "Primary" : `Display ${nextDisplay.index + 1}`} ${nextDisplay.width}x${nextDisplay.height}`
-          : "Selected display";
+      nextDisplay
+        ? `${nextDisplay.isPrimary ? "Primary" : `Display ${nextDisplay.index + 1}`} ${nextDisplay.width}x${nextDisplay.height}`
+        : "Selected display";
 
-    setDisplaySelection(nextSelection);
+    setDisplaySelection(selection);
     setMessage(`Capture source: ${nextLabel}`);
   }
 
-  async function notifyEditorSessionUpdated() {
-    const editorWindow = await WebviewWindow.getByLabel("editor");
-    if (editorWindow) {
-      await editorWindow.emit("smoothshot:session-updated");
+  async function hideDisplayPopup() {
+    setIsDisplayPickerOpen(false);
+    const popup = await WebviewWindow.getByLabel("display-picker");
+    if (popup) {
+      await popup.hide().catch(() => {
+        // Ignore popup hide failures.
+      });
     }
   }
 
   async function startRecording() {
     try {
+      await hideDisplayPopup();
+      const effectiveMode = launcherMode ?? "display";
       const request = {
         fps,
-        region: regionEnabled ? region : null,
-        displayIndex: displaySelection === "auto" ? null : Number(displaySelection),
+        region: effectiveMode === "area" ? region : null,
+        displayIndex: displaySelection.length > 0 ? Number(displaySelection) : null,
       };
       const nextStatus = await invoke<RecordingStatus>("start_recording", { request });
       setStatus(nextStatus);
@@ -308,52 +591,6 @@ function App() {
     }
   }
 
-  async function stopRecording() {
-    try {
-      const result = await invoke<StopRecordingResponse>("stop_recording");
-      setLastSession(result);
-      setRecording(false);
-      setTrimStartMs(0);
-      setTrimEndMs(result.durationMs);
-      setCurrentTimeMs(0);
-      setIsPlayingPreview(false);
-      const [clicks, frameTrack, nextStatus] = await Promise.all([
-        invoke<ClickEvent[]>("get_click_timeline"),
-        invoke<FrameMetadata[]>("get_frame_timeline", { limit: 5000 }),
-        invoke<RecordingStatus>("get_recording_status"),
-      ]);
-      setTimeline(clicks.slice(-16).reverse());
-      setZoomMarkers(clickEventsToMarkers(clicks));
-      setCursorTrack(frameTrack);
-      setStatus(nextStatus);
-      setPreviewDurationMs(result.durationMs);
-
-      setPreviewUrl(null);
-      setMessage("Recording complete. Editor opened with direct frame preview.");
-      if (false) {
-        try {
-          const proxy = await invoke<GeneratePreviewProxyResponse>("generate_preview_proxy");
-          setPreviewUrl(toLocalFileUrl(proxy.proxyPath));
-          setPreviewDurationMs(proxy.durationMs);
-          setMessage("Recording complete. Preview ready – editor opened.");
-        } catch {
-          setMessage("Recording complete. Editor opened. Export to load preview.");
-        }
-      } else {
-        setPreviewUrl(null);
-        setMessage("Recording complete. Editor opened with direct frame preview.");
-      }
-
-      await openEditorWindow();
-      if (windowLabel === "editor") {
-        setView("editor");
-      }
-      void notifyEditorSessionUpdated();
-    } catch (error) {
-      setMessage(`Could not stop recording: ${String(error)}`);
-    }
-  }
-
   async function refreshEditorSessionData() {
     try {
       const [nextStatus, clicks, summary, frameTrack] = await Promise.all([
@@ -362,56 +599,24 @@ function App() {
         invoke<StopRecordingResponse | null>("get_last_session_summary"),
         invoke<FrameMetadata[]>("get_frame_timeline", { limit: 5000 }),
       ]);
+      const normalized = normalizeSessionTiming(clicks, frameTrack);
 
       setStatus(nextStatus);
       setRecording(nextStatus.isRecording);
-      setTimeline(clicks.slice(-16).reverse());
-      setZoomMarkers(clickEventsToMarkers(clicks));
-      setCursorTrack(frameTrack);
+      setTimeline(normalized.clicks.slice(-16).reverse());
+      setZoomMarkers(clickEventsToMarkers(normalized.clicks, summary?.durationMs ?? 0));
+      setCursorTrack(normalized.frameTrack);
 
       if (summary) {
         setLastSession(summary);
         setTrimStartMs((prev) => Math.min(prev, summary.durationMs));
         setTrimEndMs((prev) => (prev <= 0 ? summary.durationMs : Math.min(prev, summary.durationMs)));
         setPreviewDurationMs(summary.durationMs);
-        setPreviewUrl(null);
+        setPreviewUrl(summary.sourceVideoPath ? toLocalFileUrl(summary.sourceVideoPath) : null);
       }
     } catch {
       // Ignore refresh errors while editor initializes.
     }
-  }
-
-  async function openEditorWindow() {
-    if (windowLabel === "editor") {
-      setView("editor");
-      return;
-    }
-
-    const existing = await WebviewWindow.getByLabel("editor");
-    if (existing) {
-      await existing.show();
-      await existing.setFocus();
-      await existing.emit("smoothshot:session-updated");
-      return;
-    }
-
-    const editorWindow = new WebviewWindow("editor", {
-      title: "SmoothShot Editor",
-      width: 1280,
-      height: 860,
-      minWidth: 980,
-      minHeight: 680,
-      center: true,
-      focus: true,
-    });
-
-    editorWindow.once("tauri://created", async () => {
-      await editorWindow.emit("smoothshot:session-updated");
-    });
-
-    editorWindow.once("tauri://error", (event) => {
-      setMessage(`Could not open editor window: ${String(event.payload)}`);
-    });
   }
 
   async function exportRecording() {
@@ -440,16 +645,162 @@ function App() {
   }
 
   function toLocalFileUrl(path: string) {
-    const normalized = path.replace(/\\/g, "/");
-    if (/^[A-Za-z]:\//.test(normalized)) {
-      return `file:///${normalized}`;
-    }
+    return convertFileSrc(path);
+  }
 
-    if (normalized.startsWith("/")) {
-      return `file://${normalized}`;
-    }
+  async function showDisplayMenu(anchorX: number, anchorY: number) {
+    void anchorX;
+    void anchorY;
+    setDisplayPickerLoading(true);
 
-    return normalized;
+    try {
+      const currentWindow = getCurrentWindow();
+      const windowPosition = await currentWindow.outerPosition();
+      const windowSize = await currentWindow.outerSize();
+      const popupSize = getDisplayPickerSize(Math.max(1, displays.length));
+      const toPopupPosition = (size: { width: number; height: number }) => ({
+        x: Math.round(windowPosition.x + (windowSize.width - size.width) / 2),
+        y: Math.round(windowPosition.y - size.height - DISPLAY_PICKER_GAP),
+      });
+      const initialPosition = toPopupPosition(popupSize);
+
+      let popup = await WebviewWindow.getByLabel("display-picker");
+
+      if (popup) {
+        const isVisible = await popup.isVisible().catch(() => false);
+        if (isVisible) {
+          await hideDisplayPopup();
+          return;
+        }
+      }
+
+      if (!popup) {
+        new WebviewWindow("display-picker", {
+          url: "/?window=display-picker",
+          title: "Display Picker",
+          width: popupSize.width,
+          height: popupSize.height,
+          minWidth: popupSize.width,
+          minHeight: popupSize.height,
+          maxWidth: popupSize.width,
+          maxHeight: popupSize.height,
+          decorations: false,
+          transparent: true,
+          shadow: false,
+          alwaysOnTop: true,
+          focus: true,
+          visible: false,
+          skipTaskbar: true,
+          resizable: false,
+        });
+
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          popup = await WebviewWindow.getByLabel("display-picker");
+          if (popup) {
+            break;
+          }
+
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 50);
+          });
+        }
+
+        if (!popup) {
+          throw new Error("display-picker window was not created");
+        }
+      }
+
+      await popup.setSize(new LogicalSize(popupSize.width, popupSize.height));
+      await popup.setPosition(new PhysicalPosition(initialPosition.x, initialPosition.y));
+      await popup.show();
+      await popup.setFocus();
+      setIsDisplayPickerOpen(true);
+
+      await popup.emit("smoothshot:display-picker-data", {
+        displaySelection,
+        displays,
+        isLoading: true,
+      });
+      const refreshedDisplays = await loadDisplays();
+      const refreshedSize = getDisplayPickerSize(refreshedDisplays.length);
+      const refreshedPosition = toPopupPosition(refreshedSize);
+      await popup.setSize(new LogicalSize(refreshedSize.width, refreshedSize.height));
+      await popup.setPosition(new PhysicalPosition(refreshedPosition.x, refreshedPosition.y));
+      await popup.emit("smoothshot:display-picker-data", {
+        displaySelection,
+        displays: refreshedDisplays,
+        isLoading: false,
+      });
+    } catch (error) {
+      setIsDisplayPickerOpen(false);
+      setMessage(`Could not open display picker: ${String(error)}`);
+    } finally {
+      setDisplayPickerLoading(false);
+    }
+  }
+
+  async function showCameraMenu(anchorX: number, anchorY: number) {
+    const items = cameraDevices.length > 0
+      ? cameraDevices.map((device) => ({
+          id: `camera:${device.id}`,
+          text: `${device.name}${selectedCameraDevice === device.id ? "  (selected)" : ""}`,
+          action: () => {
+            setSelectedCameraDevice(device.id);
+            setCameraEnabled(true);
+            setMessage(`Camera source: ${device.name}`);
+          },
+        }))
+      : [{ id: "camera:none", text: "No camera devices found", enabled: false }];
+
+    const menu = await Menu.new({
+      items: [
+        ...items,
+        {
+          id: "camera:toggle",
+          text: cameraEnabled ? "Disable Camera" : "Enable Camera",
+          action: () => {
+            setCameraEnabled((prev) => {
+              const next = !prev;
+              setMessage(next ? `Camera enabled${selectedCameraDevice ? `: ${selectedCameraDevice}` : ""}` : "Camera disabled");
+              return next;
+            });
+          },
+        },
+      ],
+    });
+
+    await menu.popup(new LogicalPosition(anchorX - 36, anchorY - 60), getCurrentWindow());
+  }
+
+  async function showMicMenu(anchorX: number, anchorY: number) {
+    const items = microphoneDevices.length > 0
+      ? microphoneDevices.map((device) => ({
+          id: `mic:${device.id}`,
+          text: `${device.name}${selectedMicrophoneDevice === device.id ? "  (selected)" : ""}`,
+          action: () => {
+            setSelectedMicrophoneDevice(device.id);
+            if (!micEnabled) {
+              void toggleMic();
+            }
+            setMessage(`Microphone source: ${device.name}`);
+          },
+        }))
+      : [{ id: "mic:none", text: "No microphone devices found", enabled: false }];
+
+    const menu = await Menu.new({
+      items: [
+        ...items,
+        {
+          id: "mic:toggle",
+          text: micEnabled ? "Disable microphone" : "Enable microphone",
+          action: () => {
+            void toggleMic();
+          },
+        },
+      ],
+    });
+
+    await menu.popup(new LogicalPosition(anchorX - 40, anchorY - 46), getCurrentWindow());
   }
 
   async function openExportedFile() {
@@ -536,6 +887,8 @@ function App() {
         await mainWindow.setFocus();
       }
 
+      setLauncherVisible(false);
+      window.setTimeout(() => setLauncherVisible(true), 24);
       await getCurrentWebviewWindow().hide();
       return;
     }
@@ -587,11 +940,18 @@ function App() {
     });
   }
 
-  function updateZoomMarker(markerId: string, timeMs: number) {
+  function updateZoomMarker(markerId: string, startMs: number, endMs: number) {
     setZoomMarkers((prev) =>
       prev.map((marker) =>
         marker.id === markerId
-          ? { ...marker, timeMs: Math.min(Math.max(0, timeMs), Math.max(sessionDurationMs, 1000)) }
+          ? {
+              ...marker,
+              startMs: Math.min(Math.max(0, startMs), Math.max(sessionDurationMs - 250, 0)),
+              endMs: Math.min(
+                Math.max(startMs + 250, endMs),
+                Math.max(sessionDurationMs, startMs + 250),
+              ),
+            }
           : marker,
       ),
     );
@@ -619,27 +979,24 @@ function App() {
   if (view === "launcher") {
     return (
       <LauncherBar
+        isVisible={launcherVisible}
         launcherMode={launcherMode}
-        displays={displays}
-        displaySelection={displaySelection}
+        isDisplayPickerOpen={isDisplayPickerOpen}
         selectedDisplayLabel={selectedDisplayLabel}
-        fps={fps}
         region={region}
         cameraEnabled={cameraEnabled}
         micEnabled={micEnabled}
         appAudioEnabled={appAudioEnabled}
-        recording={recording}
-        canOpenEditor={canOpenEditor}
+        cameraLabel={selectedCameraLabel}
+        micLabel={selectedMicrophoneLabel}
+        micInputLevel={micInputLevel}
         onHide={hideLauncher}
+        onDismissDisplayPopup={hideDisplayPopup}
         onSelectMode={selectLauncherMode}
-        onCycleDisplaySelection={cycleDisplaySelection}
-        onSetFps={setFps}
-        onToggleCamera={() => setCameraEnabled((prev) => !prev)}
-        onToggleMic={() => void toggleMic()}
+        onOpenDisplayMenu={(x, y) => void showDisplayMenu(x, y)}
+        onOpenCameraMenu={(x, y) => void showCameraMenu(x, y)}
+        onOpenMicMenu={(x, y) => void showMicMenu(x, y)}
         onToggleAppAudio={() => void toggleAppAudio()}
-        onOpenEditor={() => void openEditorWindow()}
-        onStartRecording={() => void startRecording()}
-        onStopRecording={() => void stopRecording()}
         onShowSourceInfo={() =>
           setMessage(`Source: ${selectedDisplayLabel}${launcherMode === "area" ? ` | Area ${region.width}x${region.height}` : ""}`)
         }
@@ -647,41 +1004,64 @@ function App() {
     );
   }
 
+  if (view === "displayPicker") {
+    return (
+      <DisplayPickerWindow
+        displays={displays}
+        displaySelection={displaySelection}
+        isLoading={displayPickerLoading}
+        onSelect={(selection) => {
+          void getCurrentWebviewWindow()
+            .emitTo("main", "smoothshot:display-picker-select", selection)
+            .then(async () => {
+              await getCurrentWebviewWindow().hide();
+              await getCurrentWebviewWindow().emitTo("main", "smoothshot:display-picker-closed");
+            })
+            .catch(() => {
+              // Ignore popup dispatch failures.
+            });
+        }}
+      />
+    );
+  }
+
   return (
-    <main className="min-h-screen overflow-hidden bg-[#05060b] text-white">
+    <main className="grid h-screen grid-rows-[56px_minmax(0,1fr)_auto_auto] overflow-hidden bg-[#05060b] text-white">
       <EditorHeader
         isExporting={isExporting}
         recording={recording}
         sessionFolder={lastSession?.sessionFolder ?? null}
+        onCloseWindow={() => void closeEditorWindow()}
+        onMinimizeWindow={() => void minimizeEditorWindow()}
         onStartNewRecordingFlow={() => void startNewRecordingFlow()}
         onInitializeGpuRenderer={() => void initializeGpuRenderer()}
         onGenerateZoomPreview={() => void generateZoomPreview()}
         onExportRecording={() => void exportRecording()}
       />
 
-      <section className="grid min-h-[calc(100vh-56px-210px)] grid-cols-[minmax(0,1fr)_320px]">
+      <section className="grid min-h-0 grid-cols-[minmax(0,1fr)_320px] overflow-hidden max-[1120px]:grid-cols-1">
         <EditorPreview
           backgroundStyle={backgroundStyle}
           currentTimeMs={currentTimeMs}
           cursorTrack={cursorTrack}
           gpuStatus={gpuStatus}
           isPlaying={isPlayingPreview}
+          isMuted={isMutedPreview}
           previewUrl={previewUrl}
           sessionDurationMs={sessionDurationMs}
           status={status}
           scalePercent={scalePercent}
-          trimEndMs={trimEndMs}
-          trimStartMs={trimStartMs}
           zoomInMs={zoomInMs}
           zoomMarkers={zoomMarkers}
           zoomOutMs={zoomOutMs}
           maxZoom={maxZoom}
-          holdMs={holdMs}
           onDurationChange={setPreviewDurationMs}
           onSeekBy={seekPreviewBy}
           onTimeChange={setCurrentTimeMs}
+          onToggleMute={() => setIsMutedPreview((prev) => !prev)}
           onTogglePlay={togglePreviewPlayback}
           onPlaybackEnded={() => setIsPlayingPreview(false)}
+          onVideoError={(nextMessage) => setMessage(nextMessage)}
         />
         <EditorInspector
           audioGain={audioGain}
@@ -738,7 +1118,7 @@ function App() {
 
       {lastExport && <ExportResult lastExport={lastExport} />}
 
-      <p className="px-4 py-2 text-[0.82rem] text-[#8f9bb8]">{message}</p>
+      <p className="shrink-0 px-4 py-2 text-[0.82rem] text-[#8f9bb8]">{message}</p>
     </main>
   );
 }

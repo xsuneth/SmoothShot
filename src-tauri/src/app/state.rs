@@ -30,10 +30,13 @@ pub struct RecorderInner {
     pub session_capture: Option<SessionCaptureConfig>,
     pub stop_signal: Option<Arc<AtomicBool>>,
     pub handle: Option<JoinHandle<()>>,
+    /// Lightweight per-frame metadata retained in memory.
     pub raw_frames: Arc<Mutex<Vec<RawFrame>>>,
     pub click_events: Arc<Mutex<Vec<ClickEvent>>>,
     /// Path to the session folder written to disk after the last recording.
     pub session_folder: Option<String>,
+    /// Path to the source MP4 written during recording.
+    pub source_video_path: Option<String>,
     /// Path to the proxy MP4 (set after generate_preview_proxy succeeds).
     pub proxy_path: Option<String>,
 }
@@ -45,4 +48,6 @@ pub struct AppState {
     pub recorder: Mutex<RecorderInner>,
     pub gpu_renderer: Mutex<GpuRendererState>,
     pub audio_config: Mutex<AudioConfig>,
+    pub mic_meter_stop: Mutex<Option<Arc<AtomicBool>>>,
+    pub mic_meter_handle: Mutex<Option<JoinHandle<()>>>,
 }

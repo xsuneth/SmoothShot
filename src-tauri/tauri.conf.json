@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.smoothshot.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "devUrl": "http://127.0.0.1:3000",
+    "beforeDevCommand": "pnpm dev -- --host 127.0.0.1 --port 1420 --strictPort",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
@@ -14,15 +14,17 @@
       {
         "label": "main",
         "title": "SmoothShot",
-        "width": 1220,
-        "height": 54,
-        "minWidth": 1120,
-        "minHeight": 54,
-        "maxHeight": 54,
+        "width": 746,
+        "height": 60,
+        "minWidth": 746,
+        "minHeight": 60,
+        "maxHeight": 60,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
-        "transparent": true
+        "transparent": true,
+        "visible": false,
+        "shadow": false
       },
       {
         "label": "editor",
@@ -31,10 +33,17 @@
         "height": 860,
         "minWidth": 980,
         "minHeight": 680,
-        "visible": false
+        "visible": false,
+        "decorations": false
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      },
       "csp": null
     }
   },

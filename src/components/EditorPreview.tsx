@@ -15,15 +15,13 @@ type EditorPreviewProps = {
   currentTimeMs: number;
   cursorTrack: FrameMetadata[];
   gpuStatus: GpuInitStatus | null;
-  holdMs: number;
   isPlaying: boolean;
+  isMuted: boolean;
   maxZoom: number;
   previewUrl: string | null;
   scalePercent: number;
   sessionDurationMs: number;
   status: RecordingStatus;
-  trimEndMs: number;
-  trimStartMs: number;
   zoomInMs: number;
   zoomMarkers: ZoomMarker[];
   zoomOutMs: number;
@@ -31,7 +29,9 @@ type EditorPreviewProps = {
   onPlaybackEnded: () => void;
   onSeekBy: (deltaMs: number) => void;
   onTimeChange: (timeMs: number) => void;
+  onToggleMute: () => void;
   onTogglePlay: () => void;
+  onVideoError?: (message: string) => void;
 };
 
 const wallpapers: Record<string, string> = {
@@ -71,6 +71,12 @@ function easeInOut(progress: number) {
   return -(Math.cos(Math.PI * progress) - 1) / 2;
 }
 
+function cubicBlend(p0: number, p1: number, p2: number, p3: number, t: number) {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+}
+
 function interpolateCursor(cursorTrack: FrameMetadata[], currentTimeMs: number) {
   if (cursorTrack.length === 0) return null;
   if (cursorTrack.length === 1 || currentTimeMs <= cursorTrack[0].timestampMs) return cursorTrack[0];
@@ -85,13 +91,15 @@ function interpolateCursor(cursorTrack: FrameMetadata[], currentTimeMs: number) 
 
   const left = cursorTrack[leftIndex];
   const right = cursorTrack[Math.min(leftIndex + 1, cursorTrack.length - 1)];
+  const before = cursorTrack[Math.max(leftIndex - 1, 0)];
+  const after = cursorTrack[Math.min(leftIndex + 2, cursorTrack.length - 1)];
   const span = Math.max(right.timestampMs - left.timestampMs, 1);
   const blend = clamp((currentTimeMs - left.timestampMs) / span, 0, 1);
 
   return {
     ...left,
-    cursorX: Math.round(left.cursorX + (right.cursorX - left.cursorX) * blend),
-    cursorY: Math.round(left.cursorY + (right.cursorY - left.cursorY) * blend),
+    cursorX: Math.round(cubicBlend(before.cursorX, left.cursorX, right.cursorX, after.cursorX, blend)),
+    cursorY: Math.round(cubicBlend(before.cursorY, left.cursorY, right.cursorY, after.cursorY, blend)),
   };
 }
 
@@ -99,25 +107,28 @@ function liveZoomState(
   zoomMarkers: ZoomMarker[],
   currentTimeMs: number,
   zoomInMs: number,
-  holdMs: number,
   zoomOutMs: number,
   maxZoom: number,
 ) {
-  const sorted = [...zoomMarkers].sort((a, b) => a.timeMs - b.timeMs);
+  const sorted = [...zoomMarkers].sort((a, b) => a.startMs - b.startMs);
   let bestZoom = 1;
   let bestMarker: ZoomMarker | null = null;
 
   for (const marker of sorted) {
-    const delta = currentTimeMs - marker.timeMs;
+    if (currentTimeMs < marker.startMs || currentTimeMs > marker.endMs) {
+      continue;
+    }
+
+    const entryDelta = currentTimeMs - marker.startMs;
+    const exitDelta = marker.endMs - currentTimeMs;
     let zoom = 1;
 
-    if (delta >= 0 && delta <= zoomInMs) {
-      zoom = 1 + (maxZoom - 1) * easeInOut(delta / Math.max(zoomInMs, 1));
-    } else if (delta > zoomInMs && delta <= zoomInMs + holdMs) {
+    if (entryDelta <= zoomInMs) {
+      zoom = 1 + (maxZoom - 1) * easeInOut(entryDelta / Math.max(zoomInMs, 1));
+    } else if (exitDelta <= zoomOutMs) {
+      zoom = 1 + (maxZoom - 1) * easeInOut(exitDelta / Math.max(zoomOutMs, 1));
+    } else {
       zoom = maxZoom;
-    } else if (delta > zoomInMs + holdMs && delta <= zoomInMs + holdMs + zoomOutMs) {
-      const progress = (delta - zoomInMs - holdMs) / Math.max(zoomOutMs, 1);
-      zoom = maxZoom - (maxZoom - 1) * easeInOut(progress);
     }
 
     if (zoom > bestZoom) {
@@ -134,15 +145,13 @@ export function EditorPreview({
   currentTimeMs,
   cursorTrack,
   gpuStatus,
-  holdMs,
   isPlaying,
+  isMuted,
   maxZoom,
   previewUrl,
   scalePercent,
   sessionDurationMs,
   status,
-  trimEndMs,
-  trimStartMs,
   zoomInMs,
   zoomMarkers,
   zoomOutMs,
@@ -150,12 +159,17 @@ export function EditorPreview({
   onPlaybackEnded,
   onSeekBy,
   onTimeChange,
+  onToggleMute,
   onTogglePlay,
+  onVideoError,
 }: EditorPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const currentTimeRef = useRef(currentTimeMs);
+  const requestSequenceRef = useRef(0);
   const [previewFrame, setPreviewFrame] = useState<PreviewFrameResponse | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
+  const [resolvedPreviewUrl, setResolvedPreviewUrl] = useState<string | null>(null);
   const stageBackground = backgroundCss(backgroundStyle);
 
   const activeCursor = useMemo(() => interpolateCursor(cursorTrack, currentTimeMs), [cursorTrack, currentTimeMs]);
@@ -165,29 +179,81 @@ export function EditorPreview({
   const cursorTop = activeCursor ? clamp((activeCursor.cursorY / sourceHeight) * 100, 0, 100) : 50;
 
   const { zoom, marker: zoomFocusMarker } = useMemo(
-    () => liveZoomState(zoomMarkers, currentTimeMs, zoomInMs, holdMs, zoomOutMs, maxZoom),
-    [zoomMarkers, currentTimeMs, zoomInMs, holdMs, zoomOutMs, maxZoom],
+    () => liveZoomState(zoomMarkers, currentTimeMs, zoomInMs, zoomOutMs, maxZoom),
+    [zoomMarkers, currentTimeMs, zoomInMs, zoomOutMs, maxZoom],
   );
 
-  const focusXPercent = zoomFocusMarker ? clamp((zoomFocusMarker.cursorX / sourceWidth) * 100, 5, 95) : 50;
-  const focusYPercent = zoomFocusMarker ? clamp((zoomFocusMarker.cursorY / sourceHeight) * 100, 5, 95) : 50;
+  const focusXPercent = zoomFocusMarker && activeCursor ? clamp((activeCursor.cursorX / sourceWidth) * 100, 5, 95) : 50;
+  const focusYPercent = zoomFocusMarker && activeCursor ? clamp((activeCursor.cursorY / sourceHeight) * 100, 5, 95) : 50;
   const translateX = (50 - focusXPercent) * (zoom - 1);
   const translateY = (50 - focusYPercent) * (zoom - 1);
 
-  const activeClickPulse = useMemo(
-    () => zoomMarkers.find((marker) => Math.abs(currentTimeMs - marker.timeMs) <= 240) ?? null,
-    [zoomMarkers, currentTimeMs],
-  );
+  useEffect(() => {
+    currentTimeRef.current = currentTimeMs;
+  }, [currentTimeMs]);
+
+  useEffect(() => {
+    if (!previewUrl) {
+      setResolvedPreviewUrl(null);
+      return;
+    }
+
+    const sourceUrl = previewUrl;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+
+    async function resolvePreviewUrl() {
+      if (!sourceUrl.startsWith("http://asset.localhost/") && !sourceUrl.startsWith("asset:")) {
+        setResolvedPreviewUrl(sourceUrl);
+        return;
+      }
+
+      try {
+        const response = await fetch(sourceUrl);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        if (cancelled) {
+          return;
+        }
+
+        objectUrl = URL.createObjectURL(blob);
+        setResolvedPreviewUrl(objectUrl);
+      } catch {
+        if (!cancelled) {
+          setResolvedPreviewUrl(sourceUrl);
+        }
+      }
+    }
+
+    void resolvePreviewUrl();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [previewUrl]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || Number.isNaN(video.duration) || !Number.isFinite(video.duration)) return;
+    if (isPlaying) return;
 
     const nextSeconds = currentTimeMs / 1000;
     if (Math.abs(video.currentTime - nextSeconds) > 0.05) {
       video.currentTime = nextSeconds;
     }
-  }, [currentTimeMs]);
+  }, [currentTimeMs, isPlaying]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = isMuted;
+  }, [isMuted]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -202,32 +268,72 @@ export function EditorPreview({
   }, [isPlaying]);
 
   useEffect(() => {
+    if (!isPlaying || !resolvedPreviewUrl) {
+      return;
+    }
+
+    let frameId = 0;
+
+    const syncToVideoClock = () => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        onTimeChange(video.currentTime * 1000);
+      }
+      frameId = window.requestAnimationFrame(syncToVideoClock);
+    };
+
+    frameId = window.requestAnimationFrame(syncToVideoClock);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [isPlaying, onTimeChange, resolvedPreviewUrl]);
+
+  useEffect(() => {
     if (previewUrl || sessionDurationMs <= 0) return;
 
     let cancelled = false;
-    setIsLoadingFrame(true);
 
-    const handle = window.setTimeout(async () => {
+    const fetchFrame = async (timeMs: number) => {
+      const requestId = ++requestSequenceRef.current;
+      setIsLoadingFrame(true);
+
       try {
         const frame = await invoke<PreviewFrameResponse | null>("get_preview_frame", {
-          timeMs: Math.round(currentTimeMs),
+          timeMs: Math.round(timeMs),
         });
-        if (!cancelled) {
-          setPreviewFrame(frame);
-          if (frame) onDurationChange(sessionDurationMs);
+
+        if (cancelled || requestId !== requestSequenceRef.current) {
+          return;
+        }
+
+        setPreviewFrame(frame);
+        if (frame) {
+          onDurationChange(sessionDurationMs);
         }
       } catch {
-        if (!cancelled) {
+        if (!cancelled && requestId === requestSequenceRef.current) {
           setPreviewFrame(null);
         }
       } finally {
-        if (!cancelled) setIsLoadingFrame(false);
+        if (!cancelled && requestId === requestSequenceRef.current) {
+          setIsLoadingFrame(false);
+        }
       }
-    }, isPlaying ? 66 : 0);
+    };
+
+    if (!isPlaying) {
+      void fetchFrame(currentTimeMs);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void fetchFrame(currentTimeRef.current);
+    const intervalId = window.setInterval(() => {
+      void fetchFrame(currentTimeRef.current);
+    }, 50);
 
     return () => {
       cancelled = true;
-      window.clearTimeout(handle);
+      window.clearInterval(intervalId);
     };
   }, [currentTimeMs, isPlaying, onDurationChange, previewUrl, sessionDurationMs]);
 
@@ -290,16 +396,32 @@ export function EditorPreview({
                 className="absolute inset-0 origin-center transition-transform duration-75 ease-linear"
                 style={{ transform: `translate(${translateX}%, ${translateY}%) scale(${zoom})` }}
               >
-                {previewUrl ? (
+                {resolvedPreviewUrl ? (
                   <video
                     ref={videoRef}
                     className="h-full w-full object-cover"
-                    src={previewUrl}
+                    src={resolvedPreviewUrl}
                     playsInline
-                    preload="metadata"
+                    preload="auto"
                     onLoadedMetadata={(event) => onDurationChange(event.currentTarget.duration * 1000)}
                     onTimeUpdate={(event) => onTimeChange(event.currentTarget.currentTime * 1000)}
                     onEnded={onPlaybackEnded}
+                    onStalled={() => onVideoError?.(`Preview stalled while streaming video: ${previewUrl}`)}
+                    onSuspend={() => {
+                      // WebView2 can suspend network-like asset fetches; don't surface as a hard error.
+                    }}
+                    onEmptied={() => onVideoError?.(`Preview stream was reset for video: ${previewUrl}`)}
+                    onError={(event) => {
+                      const media = event.currentTarget.error;
+                      const reason =
+                        media?.code === MediaError.MEDIA_ERR_ABORTED ? "aborted" :
+                        media?.code === MediaError.MEDIA_ERR_NETWORK ? "network" :
+                        media?.code === MediaError.MEDIA_ERR_DECODE ? "decode" :
+                        media?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "unsupported-source" :
+                        "unknown";
+
+                      onVideoError?.(`Could not load preview video (${reason}): ${previewUrl}`);
+                    }}
                   />
                 ) : previewFrame ? (
                   <canvas ref={canvasRef} className="h-full w-full object-cover" />
@@ -318,16 +440,6 @@ export function EditorPreview({
                 )}
 
                 <div className="pointer-events-none absolute inset-0">
-                  {activeClickPulse && (
-                    <div
-                      className="absolute h-16 w-16 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/65 bg-white/10"
-                      style={{
-                        left: `${clamp((activeClickPulse.cursorX / sourceWidth) * 100, 0, 100)}%`,
-                        top: `${clamp((activeClickPulse.cursorY / sourceHeight) * 100, 0, 100)}%`,
-                        animation: "ping 0.55s ease-out 1",
-                      }}
-                    />
-                  )}
                   {activeCursor && (
                     <div
                       className="absolute -translate-x-[18%] -translate-y-[12%]"
@@ -345,10 +457,6 @@ export function EditorPreview({
                     </div>
                   )}
                 </div>
-              </div>
-
-              <div className="pointer-events-none absolute left-4 top-4 rounded-full border border-white/10 bg-black/32 px-3 py-1 text-[0.72rem] text-white/76 backdrop-blur">
-                Trim {Math.round(trimStartMs / 100) / 10}s to {Math.round(trimEndMs / 100) / 10}s
               </div>
             </div>
           </div>
@@ -401,6 +509,19 @@ export function EditorPreview({
           <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M8 7l6 5-6 5V7Zm8 0v10" />
           </svg>
+        </button>
+        <button type="button" className="rounded-full p-2 transition hover:bg-white/6" onClick={onToggleMute} aria-label={isMuted ? "Unmute preview" : "Mute preview"}>
+          {isMuted ? (
+            <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 10h4l5-4v12l-5-4H5z" />
+              <path d="M4 4l16 16" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M5 10h4l5-4v12l-5-4H5z" />
+              <path d="M18 9a4 4 0 0 1 0 6M16 7a7 7 0 0 1 0 10" />
+            </svg>
+          )}
         </button>
 
         <div className="mx-2 h-5 w-px bg-white/10" />

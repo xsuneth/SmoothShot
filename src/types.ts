@@ -19,6 +19,8 @@ export type StopRecordingResponse = {
   clicksDetected: number;
   /** Path to the session folder written to disk (if persistence succeeded). */
   sessionFolder: string | null;
+  /** Path to the captured source MP4 written during recording. */
+  sourceVideoPath: string | null;
   /** Path to the proxy MP4 (set after calling generate_preview_proxy). */
   proxyPath: string | null;
 };
@@ -71,6 +73,7 @@ export type ExportRecordingResponse = {
 export type DisplayDescriptor = {
   index: number;
   id: number;
+  name: string;
   x: number;
   y: number;
   width: number;
@@ -78,17 +81,17 @@ export type DisplayDescriptor = {
   isPrimary: boolean;
   scaleFactor: number;
   frequency: number;
+  previewPath?: string | null;
 };
 
-export type LauncherMode = "display" | "window" | "area" | "device";
-export type AppView = "launcher" | "editor";
+export type LauncherMode = "display" | "window" | "area";
+export type AppView = "launcher" | "editor" | "displayPicker";
 
 export type ZoomMarker = {
   id: string;
   label: string;
-  timeMs: number;
-  cursorX: number;
-  cursorY: number;
+  startMs: number;
+  endMs: number;
 };
 
 export type BackgroundTab = "wallpaper" | "gradient" | "color" | "image";
@@ -139,4 +142,9 @@ export type AudioConfig = {
   micEnabled: boolean;
   systemAudioGain: number;
   micGain: number;
+};
+
+export type InputDeviceOption = {
+  id: string;
+  name: string;
 };

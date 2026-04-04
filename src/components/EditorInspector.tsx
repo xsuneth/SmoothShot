@@ -97,7 +97,7 @@ export function EditorInspector({
   const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   return (
-    <aside className="h-full min-h-0 rounded-r-[18px] border-l border-white/8 bg-[#17181f] p-4 text-white">
+    <aside className="flex h-full min-h-0 flex-col rounded-r-[18px] border-l border-white/8 bg-[#17181f] p-4 text-white max-[1120px]:rounded-none max-[1120px]:border-l-0 max-[1120px]:border-t">
       <div className="mb-5">
         <h3 className="mb-3 text-xl font-semibold">Background</h3>
         <div className="flex gap-2 text-sm">
@@ -114,7 +114,7 @@ export function EditorInspector({
         </div>
       </div>
 
-      <div className="space-y-6 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pr-1">
         {backgroundStyle.tab === "wallpaper" && (
           <section>
             <p className="mb-3 text-sm font-medium text-white/85">Wallpaper</p>

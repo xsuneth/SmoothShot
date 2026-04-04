@@ -16,7 +16,7 @@ type TimelinePanelProps = {
   onSeek: (timeMs: number) => void;
   onTogglePlay: () => void;
   zoomMarkers: ZoomMarker[];
-  onMoveZoomMarker: (markerId: string, timeMs: number) => void;
+  onMoveZoomMarker: (markerId: string, startMs: number, endMs: number) => void;
   onTrimStartChange: (value: number) => void;
   onTrimEndChange: (value: number) => void;
 };
@@ -49,32 +49,36 @@ export function TimelinePanel({
   const effectiveDuration = Math.max(durationMs, trimEndMs, 1000);
   const ticks = Array.from({ length: 12 }, (_, index) => Math.round((effectiveDuration / 11) * index));
   const playheadPercent = Math.min(100, Math.max(0, (currentTimeMs / effectiveDuration) * 100));
-  const [draggingMarkerId, setDraggingMarkerId] = useState<string | null>(null);
+  const [draggingMarker, setDraggingMarker] = useState<{ id: string; mode: "move" | "start" | "end" } | null>(null);
 
   useEffect(() => {
-    if (!draggingMarkerId) {
+    if (!draggingMarker) {
       return;
     }
 
     function handlePointerUp() {
-      setDraggingMarkerId(null);
+      setDraggingMarker(null);
     }
 
     window.addEventListener("pointerup", handlePointerUp);
     return () => window.removeEventListener("pointerup", handlePointerUp);
-  }, [draggingMarkerId]);
+  }, [draggingMarker]);
 
   function markerLeft(timeMs: number) {
     return Math.min(95, Math.max(5, (timeMs / effectiveDuration) * 100));
   }
 
+  function clampTime(timeMs: number) {
+    return Math.min(Math.max(0, timeMs), effectiveDuration);
+  }
+
   return (
-    <section className="border-t border-white/8 bg-[#08090e] px-4 py-3 text-white">
-      <div className="mb-3 flex items-center justify-between">
+    <section className="shrink-0 border-t border-white/8 bg-[#08090e] px-4 py-3 text-white">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <button type="button" className="rounded-lg border border-white/8 bg-white/4 px-3 py-2 text-sm text-white/88">
           1 visible timeline
         </button>
-        <div className="flex items-center gap-3 text-sm text-white/60">
+        <div className="flex flex-wrap items-center gap-3 text-sm text-white/60">
           <button type="button" className="rounded-full border border-white/10 bg-white/6 p-2 transition hover:bg-white/10" onClick={onTogglePlay}>
             {isPlaying ? (
               <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="currentColor">
@@ -100,7 +104,7 @@ export function TimelinePanel({
         ))}
       </div>
 
-      <div className="relative overflow-hidden rounded-[16px] border border-[#3d2a05] bg-[#100b03]">
+      <div className="relative overflow-hidden rounded-[16px] border border-[#3d2a05] bg-[#100b03] pb-[4.75rem]">
         <div className="absolute inset-0 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.04)_50%,transparent_100%)] opacity-30" />
         <input
           className="absolute inset-0 z-20 cursor-pointer opacity-0"
@@ -146,14 +150,15 @@ export function TimelinePanel({
             style={{ left: `${markerLeft(trimEndMs)}%` }}
           />
           {zoomMarkers.map((marker) => (
-            <button
+            <div
               key={marker.id}
-              type="button"
-              className="absolute bottom-[-56px] z-10 flex w-[88px] -translate-x-1/2 flex-col items-center gap-2"
-              style={{ left: `${markerLeft(marker.timeMs)}%` }}
-              onPointerDown={() => setDraggingMarkerId(marker.id)}
+              className="absolute bottom-3 z-10 flex h-[54px] items-end"
+              style={{
+                left: `${(marker.startMs / effectiveDuration) * 100}%`,
+                width: `${Math.max(((marker.endMs - marker.startMs) / effectiveDuration) * 100, 4)}%`,
+              }}
               onPointerMove={(event) => {
-                if (draggingMarkerId !== marker.id) {
+                if (!draggingMarker || draggingMarker.id !== marker.id) {
                   return;
                 }
 
@@ -163,20 +168,57 @@ export function TimelinePanel({
                 }
 
                 const ratio = (event.clientX - bounds.left) / bounds.width;
-                onMoveZoomMarker(marker.id, ratio * effectiveDuration);
+                const pointerTime = clampTime(ratio * effectiveDuration);
+                const markerDuration = marker.endMs - marker.startMs;
+
+                if (draggingMarker.mode === "move") {
+                  const centeredStart = clampTime(pointerTime - markerDuration / 2);
+                  const nextEnd = Math.min(centeredStart + markerDuration, effectiveDuration);
+                  const nextStart = Math.max(0, nextEnd - markerDuration);
+                  onMoveZoomMarker(marker.id, nextStart, nextEnd);
+                  return;
+                }
+
+                if (draggingMarker.mode === "start") {
+                  onMoveZoomMarker(marker.id, Math.min(pointerTime, marker.endMs - 250), marker.endMs);
+                  return;
+                }
+
+                onMoveZoomMarker(marker.id, marker.startMs, Math.max(pointerTime, marker.startMs + 250));
               }}
-              onClick={() => onSeek(marker.timeMs)}
+              onClick={() => onSeek(marker.startMs)}
             >
-              <div className="h-8 w-px bg-[#7f5bff]" />
-              <div className="rounded-xl bg-[linear-gradient(180deg,#7d5dff,#5a38e6)] px-4 py-3 text-xs font-medium text-white shadow-[0_12px_24px_rgba(90,56,230,0.35)]">
+              <button
+                type="button"
+                className="absolute inset-0 rounded-xl bg-[linear-gradient(180deg,#7d5dff,#5a38e6)] px-4 py-2 text-xs font-medium text-white shadow-[0_12px_24px_rgba(90,56,230,0.35)]"
+                onPointerDown={() => setDraggingMarker({ id: marker.id, mode: "move" })}
+              >
                 {marker.label}
-              </div>
-            </button>
+              </button>
+              <button
+                type="button"
+                className="absolute bottom-0 left-0 top-0 w-2 cursor-ew-resize rounded-l-xl bg-white/20"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  setDraggingMarker({ id: marker.id, mode: "start" });
+                }}
+                aria-label={`Adjust ${marker.label} start`}
+              />
+              <button
+                type="button"
+                className="absolute bottom-0 right-0 top-0 w-2 cursor-ew-resize rounded-r-xl bg-white/20"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  setDraggingMarker({ id: marker.id, mode: "end" });
+                }}
+                aria-label={`Adjust ${marker.label} end`}
+              />
+            </div>
           ))}
         </div>
       </div>
 
-      <div className="mt-[4.5rem] text-sm text-white/55">
+      <div className="mt-3 text-sm text-white/55">
         Trim {trimStartMs}ms to {trimEndMs}ms{timeline.length > 0 ? ` | ${timeline.length} click events` : ""}
       </div>
     </section>

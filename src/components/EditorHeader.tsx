@@ -2,6 +2,8 @@ type EditorHeaderProps = {
   isExporting: boolean;
   recording: boolean;
   sessionFolder: string | null;
+  onCloseWindow: () => void | Promise<void>;
+  onMinimizeWindow: () => void | Promise<void>;
   onStartNewRecordingFlow: () => void | Promise<void>;
   onInitializeGpuRenderer: () => void | Promise<void>;
   onGenerateZoomPreview: () => void | Promise<void>;
@@ -12,6 +14,8 @@ export function EditorHeader({
   isExporting,
   recording,
   sessionFolder,
+  onCloseWindow,
+  onMinimizeWindow,
   onStartNewRecordingFlow,
   onInitializeGpuRenderer,
   onGenerateZoomPreview,
@@ -22,14 +26,14 @@ export function EditorHeader({
     ? sessionFolder.split(/[\\/]/).pop() ?? "SmoothShot"
     : null;
   return (
-    <header className="flex h-14 items-center justify-between border-b border-white/8 px-4 text-white">
+    <header className="flex h-14 items-center justify-between border-b border-white/8 px-4 text-white" data-tauri-drag-region>
       <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
-          <span className="h-3 w-3 rounded-full bg-[#febc2e]" />
+        <div className="no-drag flex items-center gap-2">
+          <button type="button" className="h-3 w-3 rounded-full bg-[#ff5f57] transition hover:brightness-110" onClick={onCloseWindow} aria-label="Close editor" />
+          <button type="button" className="h-3 w-3 rounded-full bg-[#febc2e] transition hover:brightness-110" onClick={onMinimizeWindow} aria-label="Minimize editor" />
           <span className="h-3 w-3 rounded-full bg-[#28c840]" />
         </div>
-        <div className="hidden items-center gap-2 text-white/70 min-[880px]:flex">
+        <div className="no-drag hidden items-center gap-2 text-white/70 min-[880px]:flex">
           <button type="button" className="rounded-md p-2 transition hover:bg-white/6" onClick={onStartNewRecordingFlow}>
             <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
               <path d="M4 7.5h16v11H4z" />
@@ -50,7 +54,7 @@ export function EditorHeader({
         </p>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="no-drag flex items-center gap-2">
         <button type="button" className="hidden rounded-lg px-3 py-2 text-sm text-white/70 transition hover:bg-white/6 hover:text-white min-[920px]:inline-flex">
           Presets
         </button>

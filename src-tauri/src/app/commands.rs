@@ -9,17 +9,18 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use screenshots::Screen;
+use serde::Deserialize;
 
 use crate::app::state::AppState;
-use crate::audio::{AudioConfig, AudioStatus};
+use crate::audio::{list_dshow_video_devices, list_input_mic_devices, AudioConfig, AudioStatus};
 use crate::capture::{
     build_frame_metadata, capture_loop, resolve_capture_screen, ClickEvent, DisplayDescriptor,
-    FrameMetadata, PreviewFrameResponse, RecordingStatus, SessionCaptureConfig, StartRecordingRequest,
-    StopRecordingResponse,
+    FrameMetadata, PreviewFrameResponse, RecordingStatus, SessionCaptureConfig,
+    StartRecordingRequest, StopRecordingResponse,
 };
 use crate::export::exporter::{export_recording, ExportRecordingRequest, ExportRecordingResponse};
 use crate::preview::preview_session::{generate_proxy, GeneratePreviewProxyResponse};
-use crate::project::persistence::persist_session;
+use crate::project::persistence::{create_session_folder, persist_session_in_folder};
 use crate::project::project_model::{CursorEventRecord, ProjectFile};
 use crate::render::compositor::{init_gpu, GpuInitStatus};
 use crate::timeline::zoom_track::{
@@ -73,19 +74,49 @@ pub fn start_recording(
     let started_at = std::time::Instant::now();
     let raw_frames = Arc::new(Mutex::new(Vec::new()));
     let click_events = Arc::new(Mutex::new(Vec::new()));
+    let audio_config = state
+        .audio_config
+        .lock()
+        .map_err(|_| "failed to lock audio config".to_string())?
+        .clone();
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let session_folder = create_session_folder(epoch)?;
+    let source_video_path = session_folder.join("source.mp4");
+
+    let session_capture = SessionCaptureConfig {
+        display_index: display_index.unwrap_or(0),
+        display_origin_x: capture_screen.display_info.x,
+        display_origin_y: capture_screen.display_info.y,
+        region: request.region,
+        source_width: region
+            .as_ref()
+            .map(|area| area.width)
+            .unwrap_or(capture_screen.display_info.width),
+        source_height: region
+            .as_ref()
+            .map(|area| area.height)
+            .unwrap_or(capture_screen.display_info.height),
+    };
 
     let thread_stop = Arc::clone(&stop_signal);
     let thread_frames = Arc::clone(&raw_frames);
     let thread_clicks = Arc::clone(&click_events);
+    let thread_source_video_path = Some(source_video_path.to_string_lossy().to_string());
+    let thread_session_capture = session_capture.clone();
     let handle = thread::spawn(move || {
         capture_loop(
             target_fps,
-            region,
             capture_screen,
+            thread_session_capture,
             thread_stop,
             started_at,
             thread_frames,
             thread_clicks,
+            thread_source_video_path,
+            audio_config,
         )
     });
 
@@ -93,16 +124,13 @@ pub fn start_recording(
     recorder.target_fps = target_fps;
     recorder.started_at = Some(started_at);
     recorder.last_session_duration_ms = 0;
-    recorder.session_capture = Some(SessionCaptureConfig {
-        display_origin_x: capture_screen.display_info.x,
-        display_origin_y: capture_screen.display_info.y,
-        region: request.region,
-    });
+    recorder.session_capture = Some(session_capture);
     recorder.stop_signal = Some(stop_signal);
     recorder.handle = Some(handle);
     recorder.raw_frames = raw_frames;
     recorder.click_events = click_events;
-    recorder.session_folder = None;
+    recorder.session_folder = Some(session_folder.to_string_lossy().to_string());
+    recorder.source_video_path = Some(source_video_path.to_string_lossy().to_string());
     recorder.proxy_path = None;
 
     Ok(RecordingStatus {
@@ -175,28 +203,36 @@ pub fn stop_recording(state: tauri::State<'_, AppState>) -> Result<StopRecording
     drop(frames_guard);
 
     // Persist session metadata to disk.
-    let epoch = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let session_folder = recorder
+        .session_folder
+        .clone()
+        .ok_or_else(|| "missing session folder".to_string())?;
 
     let project = ProjectFile {
         version: 1,
-        session_id: format!("session-{epoch}"),
-        created_at_ms: epoch * 1000,
+        session_id: std::path::Path::new(&session_folder)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("session")
+            .to_string(),
+        created_at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
         duration_ms,
         target_fps: recorder.target_fps,
         frames_captured,
         clicks_detected,
         source_width,
         source_height,
+        source_video: Some("source.mp4".to_string()),
         proxy_video: None,
         cursor_events_file: "cursor_events.json".to_string(),
         click_events_file: "click_events.json".to_string(),
     };
 
-    let session_folder = Some(persist_session(
-        epoch,
+    let session_folder = Some(persist_session_in_folder(
+        std::path::Path::new(&session_folder),
         &project,
         &click_events_for_disk,
         &cursor_events,
@@ -211,6 +247,7 @@ pub fn stop_recording(state: tauri::State<'_, AppState>) -> Result<StopRecording
         frames_captured,
         clicks_detected,
         session_folder,
+        source_video_path: recorder.source_video_path.clone(),
         proxy_path: None,
     })
 }
@@ -293,6 +330,7 @@ pub fn get_last_session_summary(
         frames_captured,
         clicks_detected,
         session_folder: recorder.session_folder.clone(),
+        source_video_path: recorder.source_video_path.clone(),
         proxy_path: recorder.proxy_path.clone(),
     }))
 }
@@ -343,7 +381,8 @@ pub fn get_preview_frame(
         return Ok(None);
     }
 
-    let target_time = time_ms.unwrap_or_else(|| frames.last().map(|frame| frame.timestamp_ms).unwrap_or(0));
+    let target_time =
+        time_ms.unwrap_or_else(|| frames.last().map(|frame| frame.timestamp_ms).unwrap_or(0));
     let mut best_index = 0usize;
     let mut best_distance = u128::MAX;
 
@@ -368,9 +407,16 @@ pub fn get_preview_frame(
 // ── Preview command ───────────────────────────────────────────────────────────
 
 #[tauri::command]
+#[allow(unused_variables)]
 pub fn generate_preview_proxy(
     state: tauri::State<'_, AppState>,
 ) -> Result<GeneratePreviewProxyResponse, String> {
+    return Err(
+        "preview proxy generation is disabled while SmoothShot uses source-video preview"
+            .to_string(),
+    );
+
+    #[allow(unreachable_code)]
     let (
         raw_frames,
         click_events_store,
@@ -460,24 +506,75 @@ pub fn initialize_gpu_renderer(state: tauri::State<'_, AppState>) -> Result<GpuI
 
 // ── Display command ───────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDisplaysRequest {
+    pub include_previews: Option<bool>,
+}
+
 #[tauri::command]
-pub fn list_displays() -> Result<Vec<DisplayDescriptor>, String> {
+pub fn list_displays(
+    request: Option<ListDisplaysRequest>,
+) -> Result<Vec<DisplayDescriptor>, String> {
+    let include_previews = request
+        .and_then(|payload| payload.include_previews)
+        .unwrap_or(false);
     let screens = Screen::all().map_err(|err| format!("failed to enumerate displays: {err}"))?;
+    let preview_dir = std::env::temp_dir()
+        .join("smoothshot")
+        .join("display-previews");
+    if include_previews {
+        let _ = std::fs::create_dir_all(&preview_dir);
+    }
+
     Ok(screens
         .iter()
         .enumerate()
-        .map(|(index, screen)| DisplayDescriptor {
-            index,
-            id: screen.display_info.id,
-            x: screen.display_info.x,
-            y: screen.display_info.y,
-            width: screen.display_info.width,
-            height: screen.display_info.height,
-            is_primary: screen.display_info.is_primary,
-            scale_factor: screen.display_info.scale_factor,
-            frequency: screen.display_info.frequency,
+        .map(|(index, screen)| {
+            let preview_path = if include_previews {
+                screen.capture().ok().and_then(|image| {
+                    let path = preview_dir.join(format!(
+                        "display-{}-{}x{}-{}.png",
+                        screen.display_info.id,
+                        screen.display_info.width,
+                        screen.display_info.height,
+                        index
+                    ));
+                    if image.save(&path).is_ok() {
+                        Some(path.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            DisplayDescriptor {
+                index,
+                id: screen.display_info.id,
+                name: format!("Display {}", index + 1),
+                x: screen.display_info.x,
+                y: screen.display_info.y,
+                width: screen.display_info.width,
+                height: screen.display_info.height,
+                is_primary: screen.display_info.is_primary,
+                scale_factor: screen.display_info.scale_factor,
+                frequency: screen.display_info.frequency,
+                preview_path,
+            }
         })
         .collect())
+}
+
+#[tauri::command]
+pub fn list_camera_devices() -> Result<Vec<String>, String> {
+    Ok(list_dshow_video_devices())
+}
+
+#[tauri::command]
+pub fn list_microphone_devices() -> Result<Vec<String>, String> {
+    Ok(list_input_mic_devices())
 }
 
 // ── Zoom preview command ──────────────────────────────────────────────────────
@@ -601,6 +698,16 @@ pub fn export_recording_cmd(
         .lock()
         .map_err(|_| "failed to lock frame buffer".to_string())?;
 
+    if frames
+        .first()
+        .map(|frame| frame.pixels_rgba.is_empty())
+        .unwrap_or(true)
+    {
+        return Err(
+            "export is not yet migrated to the new disk-backed source-video pipeline".to_string(),
+        );
+    }
+
     let click_events = recorder
         .click_events
         .lock()
@@ -636,6 +743,7 @@ pub fn get_audio_status(state: tauri::State<'_, AppState>) -> Result<AudioStatus
 
 #[tauri::command]
 pub fn set_audio_config(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     config: AudioConfig,
 ) -> Result<AudioStatus, String> {
@@ -644,6 +752,34 @@ pub fn set_audio_config(
         .lock()
         .map_err(|_| "failed to lock audio config".to_string())?;
 
-    *audio = config;
+    let mic_was_enabled = audio.mic_enabled;
+    *audio = config.clone();
+
+    if config.mic_enabled && !mic_was_enabled {
+        let mut meter_stop = state.mic_meter_stop.lock().unwrap();
+        let mut meter_handle = state.mic_meter_handle.lock().unwrap();
+
+        if let Some(stop) = meter_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = meter_handle.take() {
+            let _ = handle.join();
+        }
+
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        *meter_stop = Some(Arc::clone(&stop_signal));
+        *meter_handle = crate::capture::start_mic_level_emitter(app_handle, stop_signal);
+    } else if !config.mic_enabled && mic_was_enabled {
+        let mut meter_stop = state.mic_meter_stop.lock().unwrap();
+        let mut meter_handle = state.mic_meter_handle.lock().unwrap();
+
+        if let Some(stop) = meter_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = meter_handle.take() {
+            let _ = handle.join();
+        }
+    }
+
     Ok(AudioStatus::from_config(&audio))
 }

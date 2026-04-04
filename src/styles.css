@@ -24,8 +24,10 @@
     margin: 0;
     min-width: 320px;
     background: transparent;
+    border: none;
     color: var(--color-ink-900);
     font-family: "Segoe UI", "Inter", sans-serif;
+    border-radius: 100px;
   }
 
   #root {
