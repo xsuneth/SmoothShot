@@ -56,15 +56,15 @@ Deferred by design:
 ## Run Locally
 
 ```bash
-pnpm install
-pnpm tauri dev
+bun install
+bun run tauri dev
 ```
 
 ## Build Checks
 
 ```bash
-pnpm typecheck
-pnpm build
+bun run typecheck
+bun run build
 cd src-tauri
 cargo check
 ```

@@ -21,9 +21,22 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
+image = { version = "0.24", default-features = false, features = ["png"] }
+hound = "3"
+
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+] }
 serde_json = "1"
 screenshots = "0.8"
 device_query = "2"
 wgpu = "25"
 pollster = "0.4"
 cpal = "0.15"
+dirs-next = "2"

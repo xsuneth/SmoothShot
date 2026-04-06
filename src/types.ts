@@ -5,11 +5,20 @@ export type CaptureRegion = {
   height: number;
 };
 
+export type StartRecordingRequest = {
+  fps: number;
+  region: CaptureRegion | null;
+  displayIndex: number | null;
+};
+
 export type RecordingStatus = {
   isRecording: boolean;
+  isPaused: boolean;
   targetFps: number;
   framesCaptured: number;
   clicksDetected: number;
+  /** Wall-clock recording time excluding paused intervals (ms). */
+  elapsedMs: number;
 };
 
 export type StopRecordingResponse = {
@@ -23,6 +32,8 @@ export type StopRecordingResponse = {
   sourceVideoPath: string | null;
   /** Path to the proxy MP4 (set after calling generate_preview_proxy). */
   proxyPath: string | null;
+  /** Path to the camera MP4 recorded alongside screen capture. */
+  cameraVideoPath: string | null;
 };
 
 export type ClickEvent = {
@@ -85,7 +96,7 @@ export type DisplayDescriptor = {
 };
 
 export type LauncherMode = "display" | "window" | "area";
-export type AppView = "launcher" | "editor" | "displayPicker";
+export type AppView = "launcher" | "editor" | "displayPicker" | "cameraPreview";
 
 export type ZoomMarker = {
   id: string;
@@ -148,3 +159,4 @@ export type InputDeviceOption = {
   id: string;
   name: string;
 };
+

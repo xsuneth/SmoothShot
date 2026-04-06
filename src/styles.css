@@ -16,18 +16,26 @@
 }
 
 @layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
   * {
     box-sizing: border-box;
   }
 
   body {
     margin: 0;
-    min-width: 320px;
+    min-width: 0;
     background: transparent;
     border: none;
     color: var(--color-ink-900);
     font-family: "Segoe UI", "Inter", sans-serif;
-    border-radius: 100px;
+    /* border-radius: 100px; */
   }
 
   #root {

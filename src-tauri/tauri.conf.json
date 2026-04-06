@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.smoothshot.app",
   "build": {
-    "beforeDevCommand": "pnpm dev -- --host 127.0.0.1 --port 1420 --strictPort",
-    "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "bun run dev -- --host 127.0.0.1 --port 5173 --strictPort",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -16,15 +16,17 @@
         "title": "SmoothShot",
         "width": 746,
         "height": 60,
-        "minWidth": 746,
-        "minHeight": 60,
+        "minWidth": 231,
+        "minHeight": 52,
         "maxHeight": 60,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
         "transparent": true,
         "visible": false,
-        "shadow": false
+        "shadow": false,
+        "maximizable": false,
+        "minimizable": false
       },
       {
         "label": "editor",
@@ -35,6 +37,24 @@
         "minHeight": 680,
         "visible": false,
         "decorations": false
+      },
+      {
+        "label": "camera-preview",
+        "title": "Camera Preview",
+        "width": 250,
+        "height": 250,
+        "minWidth": 250,
+        "minHeight": 250,
+        "maxWidth": 250,
+        "maxHeight": 250,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "transparent": true,
+        "visible": false,
+        "shadow": false,
+        "maximizable": false,
+        "minimizable": false
       }
     ],
     "security": {

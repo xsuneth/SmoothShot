@@ -18,7 +18,7 @@ export default function ModeButton({
     <button
       type="button"
       className={cn(
-        "no-drag flex h-[50px] w-[60px] flex-col items-center justify-center gap-[5px] rounded-[9px] px-1 transition",
+        "no-drag flex h-12.5 w-15 flex-col items-center justify-center gap-1.25 rounded-[9px] px-1 transition",
         active
           ? "bg-white/8 text-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
           : "text-[#999] hover:bg-white/4 hover:text-neutral-400",
@@ -26,7 +26,7 @@ export default function ModeButton({
       onClick={onClick}
       aria-pressed={active}
     >
-      <span className="flex h-[20px] items-center justify-center">{active ? activeIcon : inactiveIcon ?? activeIcon}</span>
+      <span className="flex h-5 items-center justify-center">{active ? activeIcon : inactiveIcon ?? activeIcon}</span>
       <span className="text-[8.5px] font-semibold leading-none">{label}</span>
     </button>
   );

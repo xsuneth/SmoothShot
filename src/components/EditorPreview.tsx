@@ -9,8 +9,10 @@ import type {
   RecordingStatus,
   ZoomMarker,
 } from "../types";
+import { backgroundCss } from "../lib/theme";
 
 type EditorPreviewProps = {
+  cameraUrl?: string | null,
   backgroundStyle: BackgroundStyle;
   currentTimeMs: number;
   cursorTrack: FrameMetadata[];
@@ -33,35 +35,6 @@ type EditorPreviewProps = {
   onTogglePlay: () => void;
   onVideoError?: (message: string) => void;
 };
-
-const wallpapers: Record<string, string> = {
-  macos: "linear-gradient(135deg, #2241a8 0%, #4c2f7e 38%, #3d234f 100%)",
-  spring: "linear-gradient(135deg, #6cd5b6 0%, #2c7aa8 45%, #19334d 100%)",
-  sunset: "linear-gradient(135deg, #ff9966 0%, #ff5e62 35%, #59253a 100%)",
-  radial: "radial-gradient(circle at top, #5b3f95 0%, #24163d 55%, #120f1f 100%)",
-};
-
-const gradients: Record<string, string> = {
-  aurora: "linear-gradient(135deg, #30cfd0 0%, #330867 100%)",
-  candy: "linear-gradient(135deg, #fa709a 0%, #fee140 100%)",
-  ocean: "linear-gradient(135deg, #43cea2 0%, #185a9d 100%)",
-  ember: "linear-gradient(135deg, #ffaf7b 0%, #d76d77 100%)",
-};
-
-const colors: Record<string, string> = {
-  midnight: "#10131f",
-  plum: "#2d2344",
-  slate: "#19202c",
-  cream: "#ece2d0",
-};
-
-function backgroundCss(style: BackgroundStyle) {
-  if (style.tab === "wallpaper") return wallpapers[style.value] ?? wallpapers.macos;
-  if (style.tab === "gradient") return gradients[style.value] ?? gradients.aurora;
-  if (style.tab === "color") return colors[style.value] ?? colors.midnight;
-  if (style.value.trim()) return `url("${style.value}") center/cover no-repeat`;
-  return wallpapers.macos;
-}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -380,7 +353,7 @@ export function EditorPreview({
       <div className="grid min-h-0 grid-cols-[1fr_44px]">
         <div className="flex min-h-0 items-center justify-center px-6 py-5">
           <div
-            className="relative flex aspect-video w-full max-w-[860px] items-center justify-center overflow-hidden rounded-[18px] shadow-[0_20px_60px_rgba(0,0,0,0.45)] transition-all duration-200"
+            className="relative flex aspect-video w-full max-w-215 items-center justify-center overflow-hidden rounded-[18px] shadow-[0_20px_60px_rgba(0,0,0,0.45)] transition-all duration-200"
             style={{ background: stageBackground }}
           >
             <div
@@ -427,12 +400,12 @@ export function EditorPreview({
                   <canvas ref={canvasRef} className="h-full w-full object-cover" />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,#36285a_0%,#241b3f_44%,#191726_100%)]">
-                    <div className="max-w-[560px] text-center text-white">
+                    <div className="max-w-140 text-center text-white">
                       <p className="mb-3 text-xs uppercase tracking-[0.35em] text-white/45">SmoothShot Preview</p>
                       <h2 className="mb-3 text-4xl font-medium tracking-[-0.03em]">
                         {isLoadingFrame ? "Loading captured frame" : "Direct frame preview"}
                       </h2>
-                      <p className="mx-auto max-w-[460px] text-sm leading-6 text-white/62">
+                      <p className="mx-auto max-w-115 text-sm leading-6 text-white/62">
                         The editor is showing captured frames directly, with cursor and zoom layered on top.
                       </p>
                     </div>

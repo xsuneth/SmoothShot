@@ -5,8 +5,8 @@ import tailwindcss from "@tailwindcss/vite";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 const devHost = host || "127.0.0.1";
-const devPort = 1420;
-const hmrPort = 1421;
+const devPort = 5173;
+const hmrPort = 5174;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({

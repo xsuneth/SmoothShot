@@ -12,7 +12,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-use crate::audio::{find_dshow_audio_device, AudioConfig};
 use crate::export::ffmpeg_sidecar::resolve_ffmpeg;
 
 // ── Public data types ──────────────────────────────────────────────────────────
@@ -47,9 +46,12 @@ pub struct ClickEvent {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingStatus {
     pub is_recording: bool,
+    pub is_paused: bool,
     pub target_fps: u32,
     pub frames_captured: usize,
     pub clicks_detected: usize,
+    /// Wall-clock recording time excluding paused intervals (ms).
+    pub elapsed_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +67,8 @@ pub struct StopRecordingResponse {
     pub source_video_path: Option<String>,
     /// Path to the proxy MP4 (set after calling generate_preview_proxy).
     pub proxy_path: Option<String>,
+    /// Path to the camera MP4 recorded alongside screen capture.
+    pub camera_video_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,7 +141,6 @@ fn spawn_source_video_writer(
     width: u32,
     height: u32,
     target_fps: u32,
-    audio_config: &AudioConfig,
 ) -> Result<SourceVideoWriter, String> {
     let ffmpeg = resolve_ffmpeg()?;
     let mut command = Command::new(ffmpeg);
@@ -154,28 +157,7 @@ fn spawn_source_video_writer(
         .arg("-i")
         .arg("-");
 
-    let system_audio_device = if audio_config.system_audio_enabled {
-        find_dshow_audio_device("virtual-audio-capturer")
-    } else {
-        None
-    };
-    let has_system_audio = system_audio_device.is_some();
-
-    if let Some(device_name) = system_audio_device {
-        command
-            .arg("-thread_queue_size")
-            .arg("1024")
-            .arg("-f")
-            .arg("dshow")
-            .arg("-i")
-            .arg(format!("audio={device_name}"));
-    }
-
     command.arg("-map").arg("0:v:0");
-
-    if has_system_audio {
-        command.arg("-map").arg("1:a:0");
-    }
 
     command
         .arg("-c:v")
@@ -184,15 +166,6 @@ fn spawn_source_video_writer(
         .arg("yuv420p")
         .arg("-preset")
         .arg("ultrafast");
-
-    if has_system_audio {
-        command
-            .arg("-c:a")
-            .arg("aac")
-            .arg("-b:a")
-            .arg("192k")
-            .arg("-shortest");
-    }
 
     let mut child = command
         .arg("-movflags")
@@ -217,9 +190,8 @@ fn spawn_source_video_worker(
     width: u32,
     height: u32,
     target_fps: u32,
-    audio_config: &AudioConfig,
 ) -> Result<SourceVideoWorker, String> {
-    let writer = spawn_source_video_writer(output_path, width, height, target_fps, audio_config)?;
+    let writer = spawn_source_video_writer(output_path, width, height, target_fps)?;
     let (sender, receiver) = sync_channel::<SourceVideoFrame>(8);
 
     let handle = thread::spawn(move || {
@@ -461,11 +433,11 @@ pub fn capture_loop(
     capture_screen: Screen,
     session_capture: SessionCaptureConfig,
     stop_signal: Arc<AtomicBool>,
+    pause_signal: Arc<AtomicBool>,
     started_at: Instant,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
     click_events: Arc<Mutex<Vec<ClickEvent>>>,
     source_video_path: Option<String>,
-    audio_config: AudioConfig,
 ) {
     #[cfg(target_os = "windows")]
     {
@@ -474,11 +446,11 @@ pub fn capture_loop(
                 target_fps,
                 &session_capture,
                 stop_signal,
+                pause_signal,
                 started_at,
                 raw_frames,
                 click_events,
                 path,
-                audio_config,
             );
             return;
         }
@@ -489,11 +461,11 @@ pub fn capture_loop(
         capture_screen,
         session_capture,
         stop_signal,
+        pause_signal,
         started_at,
         raw_frames,
         click_events,
         source_video_path,
-        audio_config,
     );
 }
 
@@ -526,40 +498,21 @@ fn build_ddagrab_filter(session_capture: &SessionCaptureConfig, target_fps: u32)
     )
 }
 
+/// Spawn FFmpeg ddagrab — video only, no audio inputs.
+/// Audio is captured in separate threads and muxed after stop.
 #[cfg(target_os = "windows")]
 fn spawn_source_capture_process(
     output_path: &PathBuf,
     session_capture: &SessionCaptureConfig,
     target_fps: u32,
-    audio_config: &AudioConfig,
 ) -> Result<Child, String> {
     let ffmpeg = resolve_ffmpeg()?;
-    let mut command = Command::new(ffmpeg);
-    command
+    Command::new(ffmpeg)
         .arg("-y")
         .arg("-filter_complex")
-        .arg(build_ddagrab_filter(session_capture, target_fps));
-
-    let system_audio_device = if audio_config.system_audio_enabled {
-        find_dshow_audio_device("virtual-audio-capturer")
-    } else {
-        None
-    };
-
-    if let Some(device_name) = system_audio_device.as_ref() {
-        command
-            .arg("-f")
-            .arg("dshow")
-            .arg("-i")
-            .arg(format!("audio={device_name}"));
-    }
-
-    command.arg("-map").arg("[v]");
-    if system_audio_device.is_some() {
-        command.arg("-map").arg("0:a:0");
-    }
-
-    command
+        .arg(build_ddagrab_filter(session_capture, target_fps))
+        .arg("-map")
+        .arg("[v]")
         .arg("-c:v")
         .arg("h264_mf")
         .arg("-hw_encoding")
@@ -577,13 +530,7 @@ fn spawn_source_capture_process(
         .arg("-r")
         .arg(target_fps.max(1).to_string())
         .arg("-g")
-        .arg(target_fps.max(1).to_string());
-
-    if system_audio_device.is_some() {
-        command.arg("-c:a").arg("aac").arg("-b:a").arg("192k");
-    }
-
-    command
+        .arg(target_fps.max(1).to_string())
         .arg("-movflags")
         .arg("+faststart")
         .arg(output_path)
@@ -599,27 +546,29 @@ fn capture_loop_windows(
     target_fps: u32,
     session_capture: &SessionCaptureConfig,
     stop_signal: Arc<AtomicBool>,
+    pause_signal: Arc<AtomicBool>,
     _started_at: Instant,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
     click_events: Arc<Mutex<Vec<ClickEvent>>>,
     source_video_path: PathBuf,
-    audio_config: AudioConfig,
 ) {
     let device_state = DeviceState::new();
     let cursor_sample_hz = target_fps.max(1).saturating_mul(4).clamp(120, 240);
     let target_frame_time = Duration::from_secs_f64(1.0 / cursor_sample_hz as f64);
     let mut previous_buttons = vec![false; 8];
-    let mut ffmpeg_child = spawn_source_capture_process(
-        &source_video_path,
-        session_capture,
-        target_fps,
-        &audio_config,
-    )
-    .ok();
+    let mut ffmpeg_child =
+        spawn_source_capture_process(&source_video_path, session_capture, target_fps).ok();
     let capture_started_at = Instant::now();
 
     while !stop_signal.load(Ordering::Relaxed) {
         let frame_started = Instant::now();
+
+        // While paused: skip cursor/click tracking, just sleep and poll signals.
+        if pause_signal.load(Ordering::Relaxed) {
+            thread::sleep(target_frame_time);
+            continue;
+        }
+
         let mouse = device_state.get_mouse();
         let timestamp_ms = capture_started_at.elapsed().as_millis();
 
@@ -669,11 +618,11 @@ fn capture_loop_polling(
     capture_screen: Screen,
     session_capture: SessionCaptureConfig,
     stop_signal: Arc<AtomicBool>,
+    pause_signal: Arc<AtomicBool>,
     _started_at: Instant,
     raw_frames: Arc<Mutex<Vec<RawFrame>>>,
     click_events: Arc<Mutex<Vec<ClickEvent>>>,
     source_video_path: Option<String>,
-    audio_config: AudioConfig,
 ) {
     let device_state = DeviceState::new();
     let mut source_writer: Option<SourceVideoWorker> = None;
@@ -688,6 +637,12 @@ fn capture_loop_polling(
 
     while !stop_signal.load(Ordering::Relaxed) {
         let frame_started = Instant::now();
+
+        if pause_signal.load(Ordering::Relaxed) {
+            thread::sleep(target_frame_time);
+            continue;
+        }
+
         let mouse = device_state.get_mouse();
 
         let capture_result = if let Some(active_region) = &session_capture.region {
@@ -709,7 +664,7 @@ fn capture_loop_polling(
             if source_writer.is_none() {
                 if let Some(path) = source_video_path.as_ref().map(PathBuf::from) {
                     if let Ok(writer) =
-                        spawn_source_video_worker(&path, width, height, target_fps, &audio_config)
+                        spawn_source_video_worker(&path, width, height, target_fps)
                     {
                         source_writer = Some(writer);
                     }

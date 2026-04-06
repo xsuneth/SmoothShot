@@ -2,17 +2,23 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for launcher and editor windows",
-  "windows": ["main", "editor", "settings", "display-picker"],
+  "windows": ["main", "editor", "settings", "display-picker", "camera-preview"],
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-get-all-windows",
     "core:window:allow-current-monitor",
     "core:window:allow-inner-size",
+    "core:window:allow-outer-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-set-size",
     "core:window:allow-set-position",
+    "core:window:allow-is-visible",
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-focus",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
     "opener:default"
   ]
 }

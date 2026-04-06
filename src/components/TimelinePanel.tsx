@@ -104,7 +104,7 @@ export function TimelinePanel({
         ))}
       </div>
 
-      <div className="relative overflow-hidden rounded-[16px] border border-[#3d2a05] bg-[#100b03] pb-[4.75rem]">
+      <div className="relative overflow-hidden rounded-2xl border border-[#3d2a05] bg-[#100b03] pb-19">
         <div className="absolute inset-0 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.04)_50%,transparent_100%)] opacity-30" />
         <input
           className="absolute inset-0 z-20 cursor-pointer opacity-0"
@@ -115,7 +115,7 @@ export function TimelinePanel({
           onChange={(event) => onSeek(Number(event.currentTarget.value))}
         />
         <input
-          className="absolute left-0 right-0 top-[-2px] z-30 h-3 cursor-ew-resize opacity-0"
+          className="absolute -top-0.5 left-0 right-0 z-30 h-3 cursor-ew-resize opacity-0"
           type="range"
           min={0}
           max={Math.max(trimEndMs - 250, 0)}
@@ -123,14 +123,14 @@ export function TimelinePanel({
           onChange={(event) => onTrimStartChange(Number(event.currentTarget.value))}
         />
         <input
-          className="absolute left-0 right-0 top-[-2px] z-30 h-3 cursor-ew-resize opacity-0"
+          className="absolute -top-0.5 left-0 right-0 z-30 h-3 cursor-ew-resize opacity-0"
           type="range"
           min={Math.min(trimStartMs + 250, effectiveDuration)}
           max={effectiveDuration}
           value={Math.max(trimEndMs, Math.min(trimStartMs + 250, effectiveDuration))}
           onChange={(event) => onTrimEndChange(Number(event.currentTarget.value))}
         />
-        <div className="relative h-[42px] bg-[linear-gradient(180deg,#d79b1f,#b87907)]">
+        <div className="relative h-10.5 bg-[linear-gradient(180deg,#d79b1f,#b87907)]">
           <div className="absolute inset-y-0 left-[38%] w-20 bg-[rgba(255,255,255,0.08)] blur-md" />
           <div className="absolute inset-y-0 left-[62%] w-16 bg-[rgba(255,255,255,0.06)] blur-md" />
           <div
@@ -138,7 +138,7 @@ export function TimelinePanel({
             style={{ width: `${playheadPercent}%` }}
           />
           <div
-            className="absolute top-0 bottom-0 z-10 w-[2px] bg-[#8f5dff]"
+            className="absolute bottom-0 top-0 z-10 w-0.5 bg-[#8f5dff]"
             style={{ left: `${playheadPercent}%` }}
           />
           <div
@@ -152,7 +152,7 @@ export function TimelinePanel({
           {zoomMarkers.map((marker) => (
             <div
               key={marker.id}
-              className="absolute bottom-3 z-10 flex h-[54px] items-end"
+              className="absolute bottom-3 z-10 flex h-13.5 items-end"
               style={{
                 left: `${(marker.startMs / effectiveDuration) * 100}%`,
                 width: `${Math.max(((marker.endMs - marker.startMs) / effectiveDuration) * 100, 4)}%`,

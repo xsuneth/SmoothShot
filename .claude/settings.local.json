@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm typecheck:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo search:*)",
+      "Bash(cargo doc:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:crates.io)",
+      "WebSearch",
+      "Bash(grep:*)",
+      "Bash(bun run:*)"
+    ]
+  }
+}
