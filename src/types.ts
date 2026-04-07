@@ -115,6 +115,9 @@ export type BackgroundStyle = {
   blur: number;
 };
 
+export type PreviewToolPanel = "Background" | "Cursor" | "Camera";
+export type CameraCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+
 export type GeneratePreviewProxyResponse = {
   proxyPath: string;
   durationMs: number;

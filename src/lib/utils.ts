@@ -39,38 +39,21 @@ export function getDisplayPickerSize(displayCount: number) {
 }
 
 export function clickEventsToMarkers(clicks: ClickEvent[], durationMs: number): ZoomMarker[] {
-  const leftClicks = clicks
-    .filter((event) => event.button === "left")
-    .sort((a, b) => a.timestampMs - b.timestampMs);
-  const doubleClickThresholdMs = 320;
-  const toggleMoments: number[] = [];
+  const zoomDurationMs = 2000;
+  const sortedClicks = [...clicks].sort((a, b) => a.timestampMs - b.timestampMs);
+  const sessionEndMs = durationMs > 0 ? durationMs : Number.POSITIVE_INFINITY;
 
-  for (let index = 1; index < leftClicks.length; index += 1) {
-    const previous = leftClicks[index - 1];
-    const current = leftClicks[index];
-    if (current.timestampMs - previous.timestampMs <= doubleClickThresholdMs) {
-      toggleMoments.push(current.timestampMs);
-      index += 1;
-    }
-  }
+  return sortedClicks.map((event, index) => {
+    const startMs = Math.max(0, event.timestampMs);
+    const endMs = Math.min(startMs + zoomDurationMs, sessionEndMs);
 
-  const markers: ZoomMarker[] = [];
-  for (let index = 0; index < toggleMoments.length; index += 2) {
-    const startMs = toggleMoments[index];
-    const endMs = toggleMoments[index + 1] ?? durationMs;
-    if (endMs <= startMs) {
-      continue;
-    }
-
-    markers.push({
-      id: `zoom-range-${index}`,
+    return {
+      id: `zoom-click-${index}-${Math.round(startMs)}`,
       label: "Zoom",
       startMs,
-      endMs,
-    });
-  }
-
-  return markers;
+      endMs: Math.max(startMs + 250, endMs),
+    };
+  });
 }
 
 export function normalizeSessionTiming(clicks: ClickEvent[], frameTrack: FrameMetadata[]) {
@@ -100,7 +83,7 @@ export function toLocalFileUrl(path: string) {
 
 export function nextBackgroundValue(tab: BackgroundStyle["tab"]): string {
   if (tab === "wallpaper") {
-    return "macos";
+    return "/wallpapers/wallpaper1.jpg";
   }
 
   if (tab === "gradient") {

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { LauncherBar } from "../components/LauncherBar";
-import { WINDOW_LABEL_MAIN } from "../lib/constants";
+import { WINDOW_LABEL_MAIN, EVT_CAMERA_RECORD_STOP } from "../lib/constants";
 import { resolveDeviceLabel, resolveDisplayLabel } from "../lib/utils";
 import type { CaptureRegion, LauncherMode } from "../types";
 import { useAppStore } from "../store/useAppStore";
@@ -210,6 +212,15 @@ export function LauncherApp() {
     try {
       await hideDisplayPopup();
       await hideCameraPreviewWindow();
+
+      // Stop camera recording if it was active
+      void emit(EVT_CAMERA_RECORD_STOP, { save: false }).catch(() => {});
+
+      // Stop audio inputs when launcher closes (disable mic meter + system audio capture)
+      void invoke("set_audio_config", {
+        config: { systemAudioEnabled: false, micEnabled: false, systemAudioGain: 1.0, micGain: 1.0 },
+      }).catch(() => {});
+
       setLauncherVisible(false);
       await new Promise((r) => window.setTimeout(r, 140));
       await getCurrentWindow().hide();

@@ -10,12 +10,19 @@ import { usePreviewPlayback } from "../hooks/usePreviewPlayback";
 import { useTrimSettings } from "../hooks/useTrimSettings";
 import { useZoomSettings } from "../hooks/useZoomSettings";
 import { useState } from "react";
+import type { CameraCorner, PreviewToolPanel } from "../types";
 
 export function EditorApp() {
   const [padding, setPadding] = useState(32);
   const [scalePercent, setScalePercent] = useState(100);
   const [audioGain, setAudioGain] = useState(100);
   const [message, setMessage] = useState("");
+  const [activeToolPanel, setActiveToolPanel] = useState<PreviewToolPanel>("Background");
+  const [showCursor, setShowCursor] = useState(true);
+  const [cursorScale, setCursorScale] = useState(100);
+  const [cameraCorner, setCameraCorner] = useState<CameraCorner>("bottom-right");
+  const [cameraRoundness, setCameraRoundness] = useState(18);
+  const [cameraMirrored, setCameraMirrored] = useState(false);
 
   const {
     status,
@@ -135,15 +142,21 @@ export function EditorApp() {
         onExportRecording: () => void handleExportRecording(),
       }}
       previewProps={{
+        activeToolPanel,
         backgroundStyle: bg.backgroundStyle,
         cameraUrl,
+        cameraCorner,
+        cameraMirrored,
+        cameraRoundness,
         currentTimeMs: playback.currentTimeMs,
         cursorTrack,
+        cursorScale,
         gpuStatus: exportHook.gpuStatus,
         isPlaying: playback.isPlayingPreview,
         isMuted: playback.isMutedPreview,
         previewUrl,
         sessionDurationMs,
+        showCursor,
         status,
         scalePercent,
         zoomInMs: zoom.zoomInMs,
@@ -151,6 +164,7 @@ export function EditorApp() {
         zoomOutMs: zoom.zoomOutMs,
         maxZoom: zoom.maxZoom,
         onDurationChange: setPreviewDurationMs,
+        onSetActiveToolPanel: setActiveToolPanel,
         onSeekBy: playback.seekPreviewBy,
         onTimeChange: playback.setCurrentTimeMs,
         onToggleMute: playback.toggleMutePreview,
@@ -159,9 +173,14 @@ export function EditorApp() {
         onVideoError: setMessage,
       }}
       inspectorProps={{
+        activeToolPanel,
         audioGain,
         backgroundStyle: bg.backgroundStyle,
         backgroundImageFileName: bg.backgroundImageFileName,
+        cameraCorner,
+        cameraMirrored,
+        cameraRoundness,
+        cursorScale,
         exportPath: exportHook.exportPath,
         holdMs: zoom.holdMs,
         isExporting: exportHook.isExporting,
@@ -170,6 +189,7 @@ export function EditorApp() {
         padding,
         scalePercent,
         sessionDurationMs,
+        showCursor,
         trimEndMs: trim.trimEndMs,
         trimStartMs: trim.trimStartMs,
         zoomInMs: zoom.zoomInMs,
@@ -185,6 +205,11 @@ export function EditorApp() {
         onSetAudioGain: setAudioGain,
         onSetExportPath: exportHook.setExportPath,
         onOpenExportedFile: () => void handleOpenExportedFile(),
+        onSetCameraCorner: setCameraCorner,
+        onSetCameraMirrored: setCameraMirrored,
+        onSetCameraRoundness: setCameraRoundness,
+        onSetCursorScale: setCursorScale,
+        onSetShowCursor: setShowCursor,
         onSetBackgroundTab: bg.updateBackgroundTab,
         onSetBackgroundValue: bg.updateBackgroundValue,
         onSetBackgroundBlur: bg.updateBackgroundBlur,

@@ -24,10 +24,11 @@ export function EditorWindow({
   message,
 }: EditorWindowProps) {
   return (
-    <main className="grid h-screen grid-rows-[56px_minmax(0,1fr)_auto_auto] overflow-hidden bg-[#05060b] text-white">
+    <main className="grid h-screen grid-rows-[56px_minmax(0,1fr)_auto_auto_auto] overflow-hidden bg-[#0c0d12] text-white">
       <EditorHeader {...headerProps} />
 
-      <section className="grid min-h-0 grid-cols-[minmax(0,1fr)_320px] overflow-hidden max-[1120px]:grid-cols-1">
+      {/* Preview + Inspector row */}
+      <section className="grid min-h-0 overflow-hidden max-[1120px]:grid-cols-1 min-[1120px]:grid-cols-[minmax(0,1fr)_280px]">
         <EditorPreview {...previewProps} />
         <EditorInspector {...inspectorProps} />
       </section>
@@ -36,7 +37,11 @@ export function EditorWindow({
 
       {lastExport && <ExportResult lastExport={lastExport} />}
 
-      <p className="shrink-0 px-4 py-2 text-[0.82rem] text-[#8f9bb8]">{message}</p>
+      {message && (
+        <p className="shrink-0 border-t border-white/5 bg-[#0a0b10] px-4 py-2 text-[0.75rem] text-[#7888aa]">
+          {message}
+        </p>
+      )}
     </main>
   );
 }

@@ -3,8 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   BackgroundStyle,
+  CameraCorner,
   FrameMetadata,
   GpuInitStatus,
+  PreviewToolPanel,
   PreviewFrameResponse,
   RecordingStatus,
   ZoomMarker,
@@ -12,10 +14,15 @@ import type {
 import { backgroundCss } from "../lib/theme";
 
 type EditorPreviewProps = {
+  activeToolPanel: PreviewToolPanel;
   backgroundStyle: BackgroundStyle;
   cameraUrl?: string | null;
+  cameraCorner: CameraCorner;
+  cameraMirrored: boolean;
+  cameraRoundness: number;
   currentTimeMs: number;
   cursorTrack: FrameMetadata[];
+  cursorScale: number;
   gpuStatus: GpuInitStatus | null;
   isPlaying: boolean;
   isMuted: boolean;
@@ -23,11 +30,13 @@ type EditorPreviewProps = {
   previewUrl: string | null;
   scalePercent: number;
   sessionDurationMs: number;
+  showCursor: boolean;
   status: RecordingStatus;
   zoomInMs: number;
   zoomMarkers: ZoomMarker[];
   zoomOutMs: number;
   onDurationChange: (durationMs: number) => void;
+  onSetActiveToolPanel: (panel: PreviewToolPanel) => void;
   onPlaybackEnded: () => void;
   onSeekBy: (deltaMs: number) => void;
   onTimeChange: (timeMs: number) => void;
@@ -114,10 +123,15 @@ function liveZoomState(
 }
 
 export function EditorPreview({
+  activeToolPanel,
   backgroundStyle,
   cameraUrl,
+  cameraCorner,
+  cameraMirrored,
+  cameraRoundness,
   currentTimeMs,
   cursorTrack,
+  cursorScale,
   gpuStatus,
   isPlaying,
   isMuted,
@@ -125,11 +139,13 @@ export function EditorPreview({
   previewUrl,
   scalePercent,
   sessionDurationMs,
+  showCursor,
   status,
   zoomInMs,
   zoomMarkers,
   zoomOutMs,
   onDurationChange,
+  onSetActiveToolPanel,
   onPlaybackEnded,
   onSeekBy,
   onTimeChange,
@@ -137,6 +153,7 @@ export function EditorPreview({
   onTogglePlay,
   onVideoError,
 }: EditorPreviewProps) {
+  const stageContainerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -144,11 +161,19 @@ export function EditorPreview({
   const requestSequenceRef = useRef(0);
   const [previewFrame, setPreviewFrame] = useState<PreviewFrameResponse | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
+  const [mediaDimensions, setMediaDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [stageSize, setStageSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const stageBackground = backgroundCss(backgroundStyle);
 
   const activeCursor = useMemo(() => interpolateCursor(cursorTrack, currentTimeMs), [cursorTrack, currentTimeMs]);
-  const sourceWidth = previewFrame?.width ?? activeCursor?.width ?? cursorTrack[0]?.width ?? 1920;
-  const sourceHeight = previewFrame?.height ?? activeCursor?.height ?? cursorTrack[0]?.height ?? 1080;
+  const sourceWidth = mediaDimensions?.width ?? previewFrame?.width ?? activeCursor?.width ?? cursorTrack[0]?.width ?? 1920;
+  const sourceHeight = mediaDimensions?.height ?? previewFrame?.height ?? activeCursor?.height ?? cursorTrack[0]?.height ?? 1080;
+  const previewAspectRatio =
+    mediaDimensions?.width && mediaDimensions?.height
+      ? mediaDimensions.width / mediaDimensions.height
+      : previewFrame?.width && previewFrame?.height
+        ? previewFrame.width / previewFrame.height
+        : 16 / 9;
   const cursorLeft = activeCursor ? clamp((activeCursor.cursorX / sourceWidth) * 100, 0, 100) : 50;
   const cursorTop = activeCursor ? clamp((activeCursor.cursorY / sourceHeight) * 100, 0, 100) : 50;
 
@@ -161,6 +186,12 @@ export function EditorPreview({
   const focusYPercent = zoomFocusMarker && activeCursor ? clamp((activeCursor.cursorY / sourceHeight) * 100, 5, 95) : 50;
   const translateX = (50 - focusXPercent) * (zoom - 1);
   const translateY = (50 - focusYPercent) * (zoom - 1);
+  const cameraCornerClass = useMemo(() => {
+    if (cameraCorner === "top-left") return "top-3 left-3";
+    if (cameraCorner === "top-right") return "top-3 right-3";
+    if (cameraCorner === "bottom-left") return "bottom-3 left-3";
+    return "bottom-3 right-3";
+  }, [cameraCorner]);
 
   useEffect(() => {
     currentTimeRef.current = currentTimeMs;
@@ -289,6 +320,40 @@ export function EditorPreview({
     context.putImageData(new ImageData(data, previewFrame.width, previewFrame.height), 0, 0);
   }, [previewFrame]);
 
+  useEffect(() => {
+    if (previewUrl) {
+      setMediaDimensions(null);
+    }
+  }, [previewUrl]);
+
+  useEffect(() => {
+    const container = stageContainerRef.current;
+    if (!container) return;
+
+    const updateStageSize = () => {
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      if (width <= 0 || height <= 0) return;
+
+      const containerRatio = width / height;
+      if (containerRatio > previewAspectRatio) {
+        const nextHeight = height;
+        const nextWidth = Math.round(height * previewAspectRatio);
+        setStageSize({ width: nextWidth, height: nextHeight });
+      } else {
+        const nextWidth = width;
+        const nextHeight = Math.round(width / previewAspectRatio);
+        setStageSize({ width: nextWidth, height: nextHeight });
+      }
+    };
+
+    updateStageSize();
+    const observer = new ResizeObserver(updateStageSize);
+    observer.observe(container);
+
+    return () => observer.disconnect();
+  }, [previewAspectRatio]);
+
   return (
     <article className="grid min-h-0 grid-rows-[auto_1fr_auto] rounded-r-[18px] bg-[#05060b]">
       <div className="flex h-12 items-center justify-center gap-6 border-b border-white/6 text-sm text-white/82">
@@ -315,19 +380,27 @@ export function EditorPreview({
       </div>
 
       <div className="grid min-h-0 grid-cols-[1fr_44px]">
-        <div className="flex min-h-0 items-center justify-center px-6 py-5">
-          <div
-            className="relative flex aspect-video w-full max-w-215 items-center justify-center overflow-hidden rounded-[18px] shadow-[0_20px_60px_rgba(0,0,0,0.45)] transition-all duration-200"
-            style={{ background: stageBackground }}
-          >
+        <div className="flex min-h-0 items-center justify-center p-3">
+          <div ref={stageContainerRef} className="relative h-full w-full">
+            <div
+              className="absolute inset-0 m-auto flex items-center justify-center overflow-hidden rounded-[18px] shadow-[0_20px_60px_rgba(0,0,0,0.45)] transition-all duration-200"
+              style={{
+                background: stageBackground,
+                width: `${stageSize.width}px`,
+                height: `${stageSize.height}px`,
+              }}
+            >
             <div
               className="absolute inset-0 scale-110"
               style={{ background: stageBackground, filter: `blur(${backgroundStyle.blur}px)` }}
             />
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08),transparent_55%)]" />
             <div
-              className="relative z-10 aspect-video w-[82%] overflow-hidden rounded-[18px] border border-white/10 bg-black/40 shadow-[0_16px_50px_rgba(0,0,0,0.4)] transition-transform duration-200"
-              style={{ transform: `scale(${scalePercent / 100})` }}
+              className="relative z-10 w-[92%] max-h-[92%] overflow-visible rounded-[18px] border border-white/10 bg-black/40 shadow-[0_16px_50px_rgba(0,0,0,0.4)] transition-transform duration-200"
+              style={{
+                aspectRatio: previewAspectRatio,
+                transform: `scale(${scalePercent / 100})`,
+              }}
             >
               {/* Zoom + pan layer */}
               <div
@@ -341,7 +414,15 @@ export function EditorPreview({
                     src={previewUrl}
                     playsInline
                     preload="auto"
-                    onLoadedMetadata={(e) => onDurationChange(e.currentTarget.duration * 1000)}
+                    onLoadedMetadata={(e) => {
+                      onDurationChange(e.currentTarget.duration * 1000);
+                      if (e.currentTarget.videoWidth > 0 && e.currentTarget.videoHeight > 0) {
+                        setMediaDimensions({
+                          width: e.currentTarget.videoWidth,
+                          height: e.currentTarget.videoHeight,
+                        });
+                      }
+                    }}
                     onEnded={onPlaybackEnded}
                     onError={(e) => {
                       const code = e.currentTarget.error?.code;
@@ -373,12 +454,17 @@ export function EditorPreview({
 
               {/* Cursor overlay */}
               <div className="pointer-events-none absolute inset-0 z-20">
-                {activeCursor && (
+                {showCursor && activeCursor && (
                   <div
                     className="absolute -translate-x-[18%] -translate-y-[12%]"
                     style={{ left: `${cursorLeft}%`, top: `${cursorTop}%` }}
                   >
-                    <svg viewBox="0 0 24 24" className="h-8 w-8 drop-shadow-[0_8px_14px_rgba(0,0,0,0.5)]" fill="none">
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-8 w-8 drop-shadow-[0_8px_14px_rgba(0,0,0,0.5)]"
+                      style={{ transform: `scale(${cursorScale / 100})` }}
+                      fill="none"
+                    >
                       <path
                         d="M6 3.5 16.5 14l-4.3.9 1.9 5.6-2.7.9-1.9-5.5-3.8 2L6 3.5Z"
                         fill="white"
@@ -391,46 +477,94 @@ export function EditorPreview({
                 )}
               </div>
 
-              {/* Camera PiP overlay — bottom-right corner */}
-              {cameraUrl && (
-                <div className="pointer-events-none absolute bottom-3 right-3 z-30">
-                  <video
-                    ref={cameraRef}
-                    className="h-28 w-[7.5rem] rounded-xl object-cover shadow-[0_4px_18px_rgba(0,0,0,0.6)] ring-1 ring-white/20"
-                    src={cameraUrl}
-                    playsInline
-                    preload="auto"
-                    muted
-                  />
-                </div>
-              )}
+            </div>
+
+            {/* Camera PiP overlay on full preview canvas */}
+            {cameraUrl && (
+              <div className={`pointer-events-none absolute z-30 ${cameraCornerClass}`}>
+                <video
+                  ref={cameraRef}
+                  className="h-28 w-[7.5rem] object-cover shadow-[0_6px_24px_rgba(0,0,0,0.7)] ring-1 ring-white/25"
+                  style={{
+                    borderRadius: `${cameraRoundness}px`,
+                    transform: cameraMirrored ? "scaleX(-1)" : "none",
+                  }}
+                  src={cameraUrl}
+                  playsInline
+                  preload="auto"
+                  muted
+                />
+              </div>
+            )}
             </div>
           </div>
         </div>
 
-        <div className="flex flex-col items-center gap-4 border-l border-white/6 py-6 text-white/62">
-          <button type="button" className="rounded-lg p-2 transition hover:bg-white/6 hover:text-white">
-            <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M7 4h10v10H7zM4 7h10v10H4z" />
-            </svg>
-          </button>
-          <button type="button" className="rounded-lg p-2 transition hover:bg-white/6 hover:text-white">
-            <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M12 4v16M4 12h16" />
-            </svg>
-          </button>
-          <button type="button" className="rounded-lg p-2 transition hover:bg-white/6 hover:text-white">
-            <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <rect x="4.5" y="6" width="15" height="10" rx="2" />
-              <path d="M9 19h6" />
-            </svg>
-          </button>
-          <button type="button" className="rounded-lg p-2 transition hover:bg-white/6 hover:text-white">
-            <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M12 4a2.5 2.5 0 0 1 2.5 2.5V12A2.5 2.5 0 0 1 12 14.5 2.5 2.5 0 0 1 9.5 12V6.5A2.5 2.5 0 0 1 12 4z" />
-              <path d="M7 11.5a5 5 0 0 0 10 0M12 16.5V20M9 20h6" />
-            </svg>
-          </button>
+        {/* Tool sidebar */}
+        <div className="flex flex-col items-center gap-1 border-l border-white/6 py-4 text-white/45">
+          {[
+            {
+              title: "Background",
+              icon: (
+                <path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6z" />
+              ),
+            },
+            {
+              title: "Cursor",
+              icon: (
+                <path d="M6 3.5 16.5 14l-4.3.9 1.9 5.6-2.7.9-1.9-5.5-3.8 2L6 3.5Z" />
+              ),
+            },
+            {
+              title: "Camera",
+              icon: (
+                <path d="M15 10l4.553-2.277A1 1 0 0121 8.649v6.702a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+              ),
+            },
+            {
+              title: "Caption",
+              icon: (
+                <>
+                  <rect x="4.5" y="6" width="15" height="10" rx="2" />
+                  <path d="M8 11h8M8 14h5" />
+                </>
+              ),
+            },
+            {
+              title: "Audio",
+              icon: (
+                <>
+                  <path d="M12 4a2.5 2.5 0 0 1 2.5 2.5V12A2.5 2.5 0 0 1 12 14.5 2.5 2.5 0 0 1 9.5 12V6.5A2.5 2.5 0 0 1 12 4z" />
+                  <path d="M7 11.5a5 5 0 0 0 10 0M12 16.5V20" />
+                </>
+              ),
+            },
+            {
+              title: "Layout",
+              icon: (
+                <>
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <path d="M3 9h18M9 9v12" />
+                </>
+              ),
+            },
+          ].map(({ title, icon }) => (
+            <button
+              key={title}
+              type="button"
+              title={title}
+              className={`rounded-lg p-2 transition hover:bg-white/6 hover:text-white/90 ${activeToolPanel === title ? "bg-white/10 text-white" : ""}`}
+              onClick={() => {
+                if (title === "Background" || title === "Cursor" || title === "Camera") {
+                  onSetActiveToolPanel(title);
+                }
+              }}
+            >
+              <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                {icon}
+              </svg>
+            </button>
+          ))}
         </div>
       </div>
 
