@@ -19,6 +19,8 @@ export type RecordingStatus = {
   clicksDetected: number;
   /** Wall-clock recording time excluding paused intervals (ms). */
   elapsedMs: number;
+  /** Session folder path — set when recording is active. */
+  sessionFolder: string | null;
 };
 
 export type StopRecordingResponse = {

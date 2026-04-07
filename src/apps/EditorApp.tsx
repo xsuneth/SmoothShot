@@ -25,6 +25,7 @@ export function EditorApp() {
     zoomMarkers,
     cursorTrack,
     previewUrl,
+    cameraUrl,
     previewDurationMs,
     setZoomMarkers,
     setPreviewUrl,
@@ -135,6 +136,7 @@ export function EditorApp() {
       }}
       previewProps={{
         backgroundStyle: bg.backgroundStyle,
+        cameraUrl,
         currentTimeMs: playback.currentTimeMs,
         cursorTrack,
         gpuStatus: exportHook.gpuStatus,

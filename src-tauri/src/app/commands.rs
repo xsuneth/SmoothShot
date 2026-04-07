@@ -16,7 +16,6 @@ use crate::audio::{
     list_dshow_video_devices, list_input_mic_devices, start_audio_capture, stop_and_mux_audio,
     AudioConfig, AudioStatus,
 };
-use crate::camera::CameraRecording;
 use crate::capture::{
     build_frame_metadata, capture_loop, resolve_capture_screen, ClickEvent, DisplayDescriptor,
     FrameMetadata, PreviewFrameResponse, RecordingStatus, SessionCaptureConfig,
@@ -155,23 +154,11 @@ pub fn start_recording(
     recorder.audio_handles = Some(audio_handles);
     recorder.audio_config_snapshot = audio_config;
 
-    // Start camera recording alongside screen capture if a camera device is specified.
-    if let Some(ref cam_device) = camera_device {
-        let camera_path = session_folder.join("camera.mp4");
-        let camera_path_str = camera_path.to_string_lossy().to_string();
-        match CameraRecording::start(cam_device, &camera_path_str) {
-            Ok(recording) => {
-                recorder.camera_video_path = Some(camera_path_str);
-                if let Ok(mut cam) = state.camera_recording.lock() {
-                    *cam = Some(recording);
-                }
-            }
-            Err(e) => {
-                eprintln!("[camera] failed to start camera recording: {e}");
-                // Non-fatal — screen recording continues without camera.
-            }
-        }
-    }
+    // Camera recording is handled by the frontend via MediaRecorder (no device conflict).
+    // The frontend will call set_camera_video_path once it has saved the file.
+    let _ = camera_device; // consumed by frontend, not used here
+
+    let session_folder_str = session_folder.to_string_lossy().to_string();
 
     Ok(RecordingStatus {
         is_recording: true,
@@ -180,6 +167,7 @@ pub fn start_recording(
         frames_captured: 0,
         clicks_detected: 0,
         elapsed_ms: 0,
+        session_folder: Some(session_folder_str),
     })
 }
 
@@ -207,13 +195,7 @@ pub fn stop_recording(state: tauri::State<'_, AppState>) -> Result<StopRecording
         let _ = handle.join();
     }
 
-    // Stop camera recording if active
-    if let Ok(mut cam) = state.camera_recording.lock() {
-        if let Some(ref mut recording) = *cam {
-            let _ = recording.stop();
-        }
-        *cam = None;
-    }
+    // Camera recording is handled by the frontend (MediaRecorder).
 
     recorder.is_recording = false;
 
@@ -387,6 +369,7 @@ pub fn get_recording_status(state: tauri::State<'_, AppState>) -> Result<Recordi
         frames_captured,
         clicks_detected,
         elapsed_ms,
+        session_folder: recorder.session_folder.clone(),
     })
 }
 
@@ -420,6 +403,7 @@ pub fn pause_recording(state: tauri::State<'_, AppState>) -> Result<RecordingSta
         frames_captured: recorder.raw_frames.lock().map(|f| f.len()).unwrap_or(0),
         clicks_detected: recorder.click_events.lock().map(|e| e.len()).unwrap_or(0),
         elapsed_ms,
+        session_folder: recorder.session_folder.clone(),
     })
 }
 
@@ -456,6 +440,7 @@ pub fn resume_recording(state: tauri::State<'_, AppState>) -> Result<RecordingSt
         frames_captured: recorder.raw_frames.lock().map(|f| f.len()).unwrap_or(0),
         clicks_detected: recorder.click_events.lock().map(|e| e.len()).unwrap_or(0),
         elapsed_ms,
+        session_folder: recorder.session_folder.clone(),
     })
 }
 
@@ -512,6 +497,43 @@ pub fn delete_recording(state: tauri::State<'_, AppState>) -> Result<(), String>
     Ok(())
 }
 
+/// Append a chunk of bytes to a file (used by the frontend MediaRecorder camera capture).
+#[tauri::command]
+pub fn append_camera_chunk(path: String, chunk: Vec<u8>) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open camera chunk file: {e}"))?;
+    file.write_all(&chunk)
+        .map_err(|e| format!("write camera chunk: {e}"))?;
+    Ok(())
+}
+
+/// Called by the frontend when MediaRecorder has finished saving the camera file.
+#[tauri::command]
+pub fn set_camera_video_path(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let mut recorder = state
+        .recorder
+        .lock()
+        .map_err(|_| "failed to lock recorder state".to_string())?;
+    recorder.camera_video_path = Some(path);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_camera_url(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+    let recorder = state
+        .recorder
+        .lock()
+        .map_err(|_| "failed to lock recorder state".to_string())?;
+    Ok(recorder.camera_video_path.clone())
+}
+
 #[tauri::command]
 pub fn get_click_timeline(state: tauri::State<'_, AppState>) -> Result<Vec<ClickEvent>, String> {
     let recorder = state
@@ -527,6 +549,7 @@ pub fn get_click_timeline(state: tauri::State<'_, AppState>) -> Result<Vec<Click
 
     Ok(events)
 }
+
 
 #[tauri::command]
 pub fn get_last_session_summary(

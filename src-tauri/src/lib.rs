@@ -23,11 +23,12 @@ pub mod render;
 pub mod timeline;
 
 use app::commands::{
-    build_zoom_preview, delete_recording, export_recording_cmd, generate_preview_proxy,
-    get_audio_status, get_click_timeline, get_frame_timeline, get_last_session_summary,
-    get_preview_frame, get_recording_status, initialize_gpu_renderer, list_camera_devices,
-    list_displays, list_microphone_devices, mark_window_excluded, pause_recording,
-    resume_recording, set_audio_config, start_recording, stop_recording,
+    append_camera_chunk, build_zoom_preview, delete_recording, export_recording_cmd,
+    generate_preview_proxy, get_audio_status, get_camera_url, get_click_timeline,
+    get_frame_timeline, get_last_session_summary, get_preview_frame, get_recording_status,
+    initialize_gpu_renderer, list_camera_devices, list_displays, list_microphone_devices,
+    mark_window_excluded, pause_recording, resume_recording, set_audio_config,
+    set_camera_video_path, start_recording, stop_recording,
 };
 
 /// Position the launcher window at bottom-center of the primary monitor.
@@ -102,6 +103,9 @@ pub fn run() {
             get_audio_status,
             set_audio_config,
             mark_window_excluded,
+            get_camera_url,
+            append_camera_chunk,
+            set_camera_video_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -18,6 +18,7 @@ export interface UseEditorSessionResult {
   zoomMarkers: ZoomMarker[];
   cursorTrack: FrameMetadata[];
   previewUrl: string | null;
+  cameraUrl: string | null;
   previewDurationMs: number;
   setZoomMarkers: Dispatch<SetStateAction<ZoomMarker[]>>;
   setPreviewUrl: (url: string | null) => void;
@@ -36,6 +37,7 @@ const INITIAL_STATUS: RecordingStatus = {
   framesCaptured: 0,
   clicksDetected: 0,
   elapsedMs: 0,
+  sessionFolder: null,
 };
 
 export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEditorSessionResult {
@@ -46,6 +48,7 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
   const [zoomMarkers, setZoomMarkers] = useState<ZoomMarker[]>([]);
   const [cursorTrack, setCursorTrack] = useState<FrameMetadata[]>([]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [cameraUrl, setCameraUrl] = useState<string | null>(null);
   const [previewDurationMs, setPreviewDurationMs] = useState(0);
 
   const refreshEditorSessionData = useCallback(async () => {
@@ -68,6 +71,7 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
         setLastSession(summary);
         setPreviewDurationMs(summary.durationMs);
         setPreviewUrl(summary.sourceVideoPath ? toLocalFileUrl(summary.sourceVideoPath) : null);
+        setCameraUrl(summary.cameraVideoPath ? toLocalFileUrl(summary.cameraVideoPath) : null);
       }
     } catch {
       // Ignore refresh errors while editor initializes.
@@ -106,6 +110,7 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
     zoomMarkers,
     cursorTrack,
     previewUrl,
+    cameraUrl,
     previewDurationMs,
     setZoomMarkers,
     setPreviewUrl,

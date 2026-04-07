@@ -20,6 +20,7 @@ const INITIAL_STATUS: RecordingStatus = {
   framesCaptured: 0,
   clicksDetected: 0,
   elapsedMs: 0,
+  sessionFolder: null,
 };
 
 export function useRecordingStatus(): UseRecordingStatusResult {

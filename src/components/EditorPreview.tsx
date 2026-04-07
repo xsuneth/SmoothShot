@@ -12,8 +12,8 @@ import type {
 import { backgroundCss } from "../lib/theme";
 
 type EditorPreviewProps = {
-  cameraUrl?: string | null,
   backgroundStyle: BackgroundStyle;
+  cameraUrl?: string | null;
   currentTimeMs: number;
   cursorTrack: FrameMetadata[];
   gpuStatus: GpuInitStatus | null;
@@ -115,6 +115,7 @@ function liveZoomState(
 
 export function EditorPreview({
   backgroundStyle,
+  cameraUrl,
   currentTimeMs,
   cursorTrack,
   gpuStatus,
@@ -137,12 +138,12 @@ export function EditorPreview({
   onVideoError,
 }: EditorPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const currentTimeRef = useRef(currentTimeMs);
   const requestSequenceRef = useRef(0);
   const [previewFrame, setPreviewFrame] = useState<PreviewFrameResponse | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
-  const [resolvedPreviewUrl, setResolvedPreviewUrl] = useState<string | null>(null);
   const stageBackground = backgroundCss(backgroundStyle);
 
   const activeCursor = useMemo(() => interpolateCursor(cursorTrack, currentTimeMs), [cursorTrack, currentTimeMs]);
@@ -165,52 +166,7 @@ export function EditorPreview({
     currentTimeRef.current = currentTimeMs;
   }, [currentTimeMs]);
 
-  useEffect(() => {
-    if (!previewUrl) {
-      setResolvedPreviewUrl(null);
-      return;
-    }
-
-    const sourceUrl = previewUrl;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-
-    async function resolvePreviewUrl() {
-      if (!sourceUrl.startsWith("http://asset.localhost/") && !sourceUrl.startsWith("asset:")) {
-        setResolvedPreviewUrl(sourceUrl);
-        return;
-      }
-
-      try {
-        const response = await fetch(sourceUrl);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const blob = await response.blob();
-        if (cancelled) {
-          return;
-        }
-
-        objectUrl = URL.createObjectURL(blob);
-        setResolvedPreviewUrl(objectUrl);
-      } catch {
-        if (!cancelled) {
-          setResolvedPreviewUrl(sourceUrl);
-        }
-      }
-    }
-
-    void resolvePreviewUrl();
-
-    return () => {
-      cancelled = true;
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [previewUrl]);
-
+  // Seek main video when scrubbing (not playing).
   useEffect(() => {
     const video = videoRef.current;
     if (!video || Number.isNaN(video.duration) || !Number.isFinite(video.duration)) return;
@@ -222,28 +178,42 @@ export function EditorPreview({
     }
   }, [currentTimeMs, isPlaying]);
 
+  // Keep camera PiP in sync with main video while scrubbing.
+  useEffect(() => {
+    const cam = cameraRef.current;
+    if (!cam || Number.isNaN(cam.duration) || !Number.isFinite(cam.duration)) return;
+    if (isPlaying) return;
+
+    const nextSeconds = currentTimeMs / 1000;
+    if (Math.abs(cam.currentTime - nextSeconds) > 0.05) {
+      cam.currentTime = nextSeconds;
+    }
+  }, [currentTimeMs, isPlaying]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     video.muted = isMuted;
   }, [isMuted]);
 
+  // Play/pause main video and camera PiP together.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video) return;
+    const cam = cameraRef.current;
 
     if (isPlaying) {
-      void video.play().catch(() => {});
+      void video?.play().catch(() => {});
+      void cam?.play().catch(() => {});
       return;
     }
 
-    video.pause();
+    video?.pause();
+    cam?.pause();
   }, [isPlaying]);
 
+  // Drive currentTimeMs from the main video clock during playback.
   useEffect(() => {
-    if (!isPlaying || !resolvedPreviewUrl) {
-      return;
-    }
+    if (!isPlaying || !previewUrl) return;
 
     let frameId = 0;
 
@@ -257,8 +227,9 @@ export function EditorPreview({
 
     frameId = window.requestAnimationFrame(syncToVideoClock);
     return () => window.cancelAnimationFrame(frameId);
-  }, [isPlaying, onTimeChange, resolvedPreviewUrl]);
+  }, [isPlaying, onTimeChange, previewUrl]);
 
+  // Fallback canvas-based frame preview (no video file yet).
   useEffect(() => {
     if (previewUrl || sessionDurationMs <= 0) return;
 
@@ -273,14 +244,10 @@ export function EditorPreview({
           timeMs: Math.round(timeMs),
         });
 
-        if (cancelled || requestId !== requestSequenceRef.current) {
-          return;
-        }
+        if (cancelled || requestId !== requestSequenceRef.current) return;
 
         setPreviewFrame(frame);
-        if (frame) {
-          onDurationChange(sessionDurationMs);
-        }
+        if (frame) onDurationChange(sessionDurationMs);
       } catch {
         if (!cancelled && requestId === requestSequenceRef.current) {
           setPreviewFrame(null);
@@ -294,9 +261,7 @@ export function EditorPreview({
 
     if (!isPlaying) {
       void fetchFrame(currentTimeMs);
-      return () => {
-        cancelled = true;
-      };
+      return () => { cancelled = true; };
     }
 
     void fetchFrame(currentTimeRef.current);
@@ -321,8 +286,7 @@ export function EditorPreview({
     if (!context) return;
 
     const data = new Uint8ClampedArray(previewFrame.pixelsRgba);
-    const imageData = new ImageData(data, previewFrame.width, previewFrame.height);
-    context.putImageData(imageData, 0, 0);
+    context.putImageData(new ImageData(data, previewFrame.width, previewFrame.height), 0, 0);
   }, [previewFrame]);
 
   return (
@@ -365,34 +329,28 @@ export function EditorPreview({
               className="relative z-10 aspect-video w-[82%] overflow-hidden rounded-[18px] border border-white/10 bg-black/40 shadow-[0_16px_50px_rgba(0,0,0,0.4)] transition-transform duration-200"
               style={{ transform: `scale(${scalePercent / 100})` }}
             >
+              {/* Zoom + pan layer */}
               <div
                 className="absolute inset-0 origin-center transition-transform duration-75 ease-linear"
                 style={{ transform: `translate(${translateX}%, ${translateY}%) scale(${zoom})` }}
               >
-                {resolvedPreviewUrl ? (
+                {previewUrl ? (
                   <video
                     ref={videoRef}
                     className="h-full w-full object-cover"
-                    src={resolvedPreviewUrl}
+                    src={previewUrl}
                     playsInline
                     preload="auto"
-                    onLoadedMetadata={(event) => onDurationChange(event.currentTarget.duration * 1000)}
-                    onTimeUpdate={(event) => onTimeChange(event.currentTarget.currentTime * 1000)}
+                    onLoadedMetadata={(e) => onDurationChange(e.currentTarget.duration * 1000)}
                     onEnded={onPlaybackEnded}
-                    onStalled={() => onVideoError?.(`Preview stalled while streaming video: ${previewUrl}`)}
-                    onSuspend={() => {
-                      // WebView2 can suspend network-like asset fetches; don't surface as a hard error.
-                    }}
-                    onEmptied={() => onVideoError?.(`Preview stream was reset for video: ${previewUrl}`)}
-                    onError={(event) => {
-                      const media = event.currentTarget.error;
+                    onError={(e) => {
+                      const code = e.currentTarget.error?.code;
                       const reason =
-                        media?.code === MediaError.MEDIA_ERR_ABORTED ? "aborted" :
-                        media?.code === MediaError.MEDIA_ERR_NETWORK ? "network" :
-                        media?.code === MediaError.MEDIA_ERR_DECODE ? "decode" :
-                        media?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "unsupported-source" :
+                        code === MediaError.MEDIA_ERR_ABORTED ? "aborted" :
+                        code === MediaError.MEDIA_ERR_NETWORK ? "network" :
+                        code === MediaError.MEDIA_ERR_DECODE ? "decode" :
+                        code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "unsupported-source" :
                         "unknown";
-
                       onVideoError?.(`Could not load preview video (${reason}): ${previewUrl}`);
                     }}
                   />
@@ -411,26 +369,41 @@ export function EditorPreview({
                     </div>
                   </div>
                 )}
-
-                <div className="pointer-events-none absolute inset-0">
-                  {activeCursor && (
-                    <div
-                      className="absolute -translate-x-[18%] -translate-y-[12%]"
-                      style={{ left: `${cursorLeft}%`, top: `${cursorTop}%` }}
-                    >
-                      <svg viewBox="0 0 24 24" className="h-8 w-8 drop-shadow-[0_8px_14px_rgba(0,0,0,0.5)]" fill="none">
-                        <path
-                          d="M6 3.5 16.5 14l-4.3.9 1.9 5.6-2.7.9-1.9-5.5-3.8 2L6 3.5Z"
-                          fill="white"
-                          stroke="rgba(12,14,20,0.85)"
-                          strokeWidth="1.2"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </div>
-                  )}
-                </div>
               </div>
+
+              {/* Cursor overlay */}
+              <div className="pointer-events-none absolute inset-0 z-20">
+                {activeCursor && (
+                  <div
+                    className="absolute -translate-x-[18%] -translate-y-[12%]"
+                    style={{ left: `${cursorLeft}%`, top: `${cursorTop}%` }}
+                  >
+                    <svg viewBox="0 0 24 24" className="h-8 w-8 drop-shadow-[0_8px_14px_rgba(0,0,0,0.5)]" fill="none">
+                      <path
+                        d="M6 3.5 16.5 14l-4.3.9 1.9 5.6-2.7.9-1.9-5.5-3.8 2L6 3.5Z"
+                        fill="white"
+                        stroke="rgba(12,14,20,0.85)"
+                        strokeWidth="1.2"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </div>
+                )}
+              </div>
+
+              {/* Camera PiP overlay — bottom-right corner */}
+              {cameraUrl && (
+                <div className="pointer-events-none absolute bottom-3 right-3 z-30">
+                  <video
+                    ref={cameraRef}
+                    className="h-28 w-[7.5rem] rounded-xl object-cover shadow-[0_4px_18px_rgba(0,0,0,0.6)] ring-1 ring-white/20"
+                    src={cameraUrl}
+                    playsInline
+                    preload="auto"
+                    muted
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -52,6 +52,8 @@ pub struct RecordingStatus {
     pub clicks_detected: usize,
     /// Wall-clock recording time excluding paused intervals (ms).
     pub elapsed_ms: u128,
+    /// Session folder path — set while recording is active.
+    pub session_folder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

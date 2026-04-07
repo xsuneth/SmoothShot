@@ -1,9 +1,15 @@
 import { useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { WINDOW_LABEL_EDITOR, EVT_SESSION_UPDATED } from "../lib/constants";
+import {
+  WINDOW_LABEL_EDITOR,
+  EVT_SESSION_UPDATED,
+  EVT_CAMERA_RECORD_START,
+  EVT_CAMERA_RECORD_STOP,
+} from "../lib/constants";
 import type {
   CaptureRegion,
   LauncherMode,
@@ -66,6 +72,11 @@ export function useRecordingFlow({
       });
       setStatus(nextStatus);
       setRecording(true);
+
+      // If camera is selected and session folder is available, start MediaRecorder
+      if (cameraDevice && nextStatus.sessionFolder) {
+        void emit(EVT_CAMERA_RECORD_START, { sessionFolder: nextStatus.sessionFolder });
+      }
     } catch (error) {
       console.error("Could not start recording:", error);
     }
@@ -73,6 +84,7 @@ export function useRecordingFlow({
 
   const stopRecording = useCallback(async () => {
     try {
+      void emit(EVT_CAMERA_RECORD_STOP, { save: true });
       await invoke("stop_recording");
       setRecording(false);
       await getCurrentWindow().hide();
@@ -124,6 +136,7 @@ export function useRecordingFlow({
 
   const deleteRecording = useCallback(async () => {
     try {
+      void emit(EVT_CAMERA_RECORD_STOP, { save: false });
       await invoke("delete_recording");
       setRecording(false);
       await getCurrentWindow().hide();

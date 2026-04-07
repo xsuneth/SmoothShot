@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 export interface UseCameraPreviewResult {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  streamRef: React.RefObject<MediaStream | null>;
   error: string | null;
   isStreaming: boolean;
 }
@@ -120,5 +121,5 @@ export function useCameraPreview({ cameraName }: UseCameraPreviewParams): UseCam
     };
   }, [cameraName]);
 
-  return { videoRef, error, isStreaming };
+  return { videoRef, streamRef, error, isStreaming };
 }
