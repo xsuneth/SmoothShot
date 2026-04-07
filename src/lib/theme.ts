@@ -22,9 +22,14 @@ export const colors: Record<string, string> = {
 };
 
 export function backgroundCss(style: BackgroundStyle): string {
-  if (style.tab === "wallpaper") return wallpapers[style.value] ?? wallpapers.macos;
+  if (style.tab === "wallpaper") {
+    if (style.value.trim()) {
+      return `url("${style.value}") center/cover no-repeat`;
+    }
+    return `url("/wallpapers/wallpaper1.jpg") center/cover no-repeat`;
+  }
   if (style.tab === "gradient") return gradients[style.value] ?? gradients.aurora;
   if (style.tab === "color") return colors[style.value] ?? colors.midnight;
   if (style.value.trim()) return `url("${style.value}") center/cover no-repeat`;
-  return wallpapers.macos;
+  return `url("/wallpapers/wallpaper1.jpg") center/cover no-repeat`;
 }
