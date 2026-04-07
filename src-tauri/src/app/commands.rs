@@ -94,7 +94,7 @@ pub fn start_recording(
     let video_raw_path = session_folder.join("video_raw.mp4");
     let source_video_path = session_folder.join("source.mp4");
 
-    // Resolve the correct ddagrab output_idx by matching DXGI desktop coordinates.
+    // Resolve the correct Windows capture monitor_idx by matching DXGI desktop coordinates.
     // The screenshots crate and DXGI may enumerate monitors in different orders, so
     // we match by origin rather than trusting the raw enumeration index.
     #[cfg(target_os = "windows")]
@@ -110,6 +110,8 @@ pub fn start_recording(
         display_origin_x: capture_screen.display_info.x,
         display_origin_y: capture_screen.display_info.y,
         region: request.region,
+        display_width: capture_screen.display_info.width,
+        display_height: capture_screen.display_info.height,
         source_width: region
             .as_ref()
             .map(|area| area.width)
@@ -350,7 +352,7 @@ pub fn stop_recording(
     // so the editor can load the video and dismiss its loading bar.
     let recorder_arc = state.recorder.clone();
     thread::spawn(move || {
-        // Wait for the capture thread (FFmpeg ddagrab) to flush and finalize.
+        // Wait for the capture thread (FFmpeg gfxcapture) to flush and finalize.
         if let Some(h) = capture_handle {
             let _ = h.join();
         }

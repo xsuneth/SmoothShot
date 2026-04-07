@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use crate::export::ffmpeg_sidecar::resolve_ffmpeg;
+#[cfg(target_os = "windows")]
+use crate::export::ffmpeg_sidecar::resolve_ffmpeg_for_windows_capture;
 
 // ── Public data types ──────────────────────────────────────────────────────────
 
@@ -240,6 +242,8 @@ pub struct SessionCaptureConfig {
     pub display_origin_x: i32,
     pub display_origin_y: i32,
     pub region: Option<CaptureRegion>,
+    pub display_width: u32,
+    pub display_height: u32,
     pub source_width: u32,
     pub source_height: u32,
 }
@@ -362,13 +366,13 @@ pub fn get_cursor_type() -> &'static str {
     }
 }
 
-/// Find the ddagrab `output_idx` for a display identified by its virtual-desktop origin.
+/// Find the Windows capture `monitor_idx` for a display identified by its
+/// virtual-desktop origin.
 ///
-/// ddagrab enumerates DXGI adapters and outputs in order; its `output_idx` is the
-/// zero-based count across *all* adapter outputs.  The screenshots crate enumerates
-/// monitors via `EnumDisplayMonitors`, which may return them in a different order, so
-/// we must look up the DXGI index by matching desktop coordinates instead of relying
-/// on the enumeration position.
+/// We enumerate DXGI adapters and outputs in order and return the flattened
+/// zero-based index across all adapter outputs. The screenshots crate may list
+/// monitors in a different order, so we match by desktop coordinates instead
+/// of trusting raw enumeration position.
 ///
 /// Falls back to 0 on any error (primary display).
 #[cfg(target_os = "windows")]
@@ -639,35 +643,43 @@ pub fn capture_loop(
 }
 
 #[cfg(target_os = "windows")]
-fn build_ddagrab_filter(session_capture: &SessionCaptureConfig, target_fps: u32) -> String {
-    let (offset_x, offset_y, width, height) = if let Some(region) = &session_capture.region {
-        (
-            region.x - session_capture.display_origin_x,
-            region.y - session_capture.display_origin_y,
-            region.width,
-            region.height,
-        )
-    } else {
-        (
-            0,
-            0,
-            session_capture.source_width,
-            session_capture.source_height,
-        )
-    };
-
-    format!(
-        "ddagrab=output_idx={}:framerate={}:draw_mouse=0:video_size={}x{}:offset_x={}:offset_y={}:dup_frames=1,hwdownload,format=bgra,format=nv12[v]",
+fn build_gfxcapture_source(session_capture: &SessionCaptureConfig, target_fps: u32) -> String {
+    let target_fps = target_fps.max(1);
+    let mut source = format!(
+        "gfxcapture=monitor_idx={}:capture_cursor=0:max_framerate={}",
         session_capture.display_index,
-        target_fps.max(1),
-        width.max(1),
-        height.max(1),
-        offset_x.max(0),
-        offset_y.max(0),
-    )
+        target_fps,
+    );
+
+    if let Some(region) = &session_capture.region {
+        let full_width = session_capture.display_width.max(1);
+        let full_height = session_capture.display_height.max(1);
+
+        let crop_left = (region.x - session_capture.display_origin_x).max(0) as u32;
+        let crop_top = (region.y - session_capture.display_origin_y).max(0) as u32;
+        let crop_left = crop_left.min(full_width.saturating_sub(1));
+        let crop_top = crop_top.min(full_height.saturating_sub(1));
+        let crop_width = region.width.max(1).min(full_width.saturating_sub(crop_left));
+        let crop_height = region
+            .height
+            .max(1)
+            .min(full_height.saturating_sub(crop_top));
+        let crop_right = full_width.saturating_sub(crop_left.saturating_add(crop_width));
+        let crop_bottom = full_height.saturating_sub(crop_top.saturating_add(crop_height));
+
+        source.push_str(&format!(
+            ":crop_left={}:crop_top={}:crop_right={}:crop_bottom={}",
+            crop_left, crop_top, crop_right, crop_bottom
+        ));
+    }
+
+    // gfxcapture is event-driven; append fps to force CFR output for timeline math.
+    source.push_str(&format!(",hwdownload,format=bgra,format=nv12,fps={target_fps}"));
+
+    source
 }
 
-/// Spawn FFmpeg ddagrab — video only, no audio inputs.
+/// Spawn FFmpeg gfxcapture (WGC) — video only, no audio inputs.
 /// Audio is captured in separate threads and muxed after stop.
 #[cfg(target_os = "windows")]
 fn spawn_source_capture_process(
@@ -675,17 +687,19 @@ fn spawn_source_capture_process(
     session_capture: &SessionCaptureConfig,
     target_fps: u32,
 ) -> Result<Child, String> {
-    let ffmpeg = resolve_ffmpeg()?;
+    let ffmpeg = resolve_ffmpeg_for_windows_capture()?;
     Command::new(ffmpeg)
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
         .arg("-nostats")
         .arg("-y")
-        .arg("-filter_complex")
-        .arg(build_ddagrab_filter(session_capture, target_fps))
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg(build_gfxcapture_source(session_capture, target_fps))
         .arg("-map")
-        .arg("[v]")
+        .arg("0:v:0")
         .arg("-c:v")
         .arg("h264_mf")
         .arg("-hw_encoding")
@@ -711,7 +725,7 @@ fn spawn_source_capture_process(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| format!("failed to start Desktop Duplication recorder: {err}"))
+        .map_err(|err| format!("failed to start Windows Graphics Capture recorder: {err}"))
 }
 
 #[cfg(target_os = "windows")]

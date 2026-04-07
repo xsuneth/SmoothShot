@@ -6,7 +6,7 @@
 // Planned Phase 6: bundle FFmpeg as a proper Tauri sidecar so that no manual
 // installation is required.  See: https://tauri.app/develop/sidecar/
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Attempt to locate an FFmpeg binary.
@@ -47,6 +47,66 @@ pub fn resolve_ffmpeg() -> Result<PathBuf, String> {
                 .to_string(),
         ),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn ffmpeg_supports_filter(ffmpeg: &Path, filter_name: &str) -> bool {
+    let output = match Command::new(ffmpeg)
+        .arg("-hide_banner")
+        .arg("-h")
+        .arg(format!("filter={filter_name}"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+
+    if combined.contains(&format!("unknown filter '{filter_name}'")) {
+        return false;
+    }
+
+    combined.contains(&format!("filter {filter_name}"))
+}
+
+#[cfg(target_os = "windows")]
+fn ffmpeg_candidates_from_path() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("ffmpeg.exe");
+            if candidate.exists() {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates
+}
+
+/// Resolve FFmpeg for Windows screen capture and ensure gfxcapture support.
+#[cfg(target_os = "windows")]
+pub fn resolve_ffmpeg_for_windows_capture() -> Result<PathBuf, String> {
+    let ffmpeg = resolve_ffmpeg()?;
+
+    if ffmpeg_supports_filter(&ffmpeg, "gfxcapture") {
+        return Ok(ffmpeg);
+    }
+
+    for candidate in ffmpeg_candidates_from_path() {
+        if ffmpeg_supports_filter(&candidate, "gfxcapture") {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "FFmpeg was found, but this build does not include the `gfxcapture` source required for Windows recording. Install a newer FFmpeg build with `gfxcapture` support (for example a recent full/nightly build), then ensure SmoothShot uses it from PATH or as a sidecar binary."
+            .to_string(),
+    )
 }
 
 /// Returns `true` if FFmpeg can be located.

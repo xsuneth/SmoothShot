@@ -118,7 +118,7 @@ pub fn start_audio_capture(
 
 /// Stop audio threads (join) and mux the resulting WAV files into the video.
 ///
-/// `video_path` — the raw video-only MP4 from ddagrab
+/// `video_path` — the raw video-only MP4 from the screen capture backend
 /// `output_path` — final source.mp4 to produce (video + audio)
 ///
 /// If no audio was captured, simply renames the video to output_path.

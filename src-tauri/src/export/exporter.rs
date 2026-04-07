@@ -2,7 +2,7 @@
 //
 // Reads source.mp4 and applies all effects (trim, zoom, padding, background)
 // in a single FFmpeg pass. No RGBA decode/re-encode: quality is preserved and
-// the pipeline works correctly on both Windows (ddagrab) and macOS paths.
+// the pipeline works correctly on both Windows (gfxcapture) and macOS paths.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
