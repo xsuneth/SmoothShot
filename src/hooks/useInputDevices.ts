@@ -53,8 +53,22 @@ export function useInputDevices(): UseInputDevicesResult {
     }
   }, [selectedCameraDevice, selectedMicrophoneDevice, setSelectedCameraDevice, setSelectedMicrophoneDevice]);
 
+  // Initial load
   useEffect(() => {
     void loadInputDevices();
+  }, [loadInputDevices]);
+
+  // Listen for device changes (camera/mic plugged in/out)
+  useEffect(() => {
+    const handleDeviceChange = () => {
+      console.log("[InputDevices] Device change detected, refreshing...");
+      void loadInputDevices();
+    };
+
+    navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+    };
   }, [loadInputDevices]);
 
   return {

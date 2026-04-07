@@ -12,7 +12,7 @@ export interface UseBackgroundResult {
   updateBackgroundImage: (file: File | null) => void;
 }
 
-const DEFAULT_BACKGROUND: BackgroundStyle = { tab: "wallpaper", value: "macos", blur: 0 };
+const DEFAULT_BACKGROUND: BackgroundStyle = { tab: "wallpaper", value: "/wallpapers/wallpaper1.jpg", blur: 0 };
 
 export function useBackground(): UseBackgroundResult {
   const [backgroundStyle, setBackgroundStyle] = useState<BackgroundStyle>(DEFAULT_BACKGROUND);
