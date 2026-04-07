@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{Emitter, Manager};
 
 use screenshots::Screen;
 use serde::Deserialize;
@@ -93,8 +94,19 @@ pub fn start_recording(
     let video_raw_path = session_folder.join("video_raw.mp4");
     let source_video_path = session_folder.join("source.mp4");
 
+    // Resolve the correct ddagrab output_idx by matching DXGI desktop coordinates.
+    // The screenshots crate and DXGI may enumerate monitors in different orders, so
+    // we match by origin rather than trusting the raw enumeration index.
+    #[cfg(target_os = "windows")]
+    let dxgi_output_idx = crate::capture::resolve_dxgi_output_idx(
+        capture_screen.display_info.x,
+        capture_screen.display_info.y,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let dxgi_output_idx = display_index.unwrap_or(0);
+
     let session_capture = SessionCaptureConfig {
-        display_index: display_index.unwrap_or(0),
+        display_index: dxgi_output_idx,
         display_origin_x: capture_screen.display_info.x,
         display_origin_y: capture_screen.display_info.y,
         region: request.region,
@@ -134,6 +146,7 @@ pub fn start_recording(
     let audio_handles = start_audio_capture(&session_folder, &audio_config, audio_stop, None);
 
     recorder.is_recording = true;
+    recorder.is_post_processing = false;
     recorder.is_paused = false;
     recorder.target_fps = target_fps;
     recorder.started_at = Some(started_at);
@@ -172,161 +185,218 @@ pub fn start_recording(
 }
 
 #[tauri::command]
-pub fn stop_recording(state: tauri::State<'_, AppState>) -> Result<StopRecordingResponse, String> {
-    let mut recorder = state
-        .recorder
-        .lock()
-        .map_err(|_| "failed to lock recorder state".to_string())?;
+pub fn stop_recording(
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<StopRecordingResponse, String> {
+    // ── Phase 1: Lock briefly — signal stop and extract everything needed ─────
+    // Return to the caller immediately with isProcessing = true.
+    // All heavy work (FFmpeg finalize, audio mux, JSON persistence) runs in a
+    // background thread so the UI stays fully responsive for long recordings.
+    let bg_data = {
+        let mut recorder = state
+            .recorder
+            .lock()
+            .map_err(|_| "failed to lock recorder state".to_string())?;
 
-    if !recorder.is_recording {
-        return Err("no active recording session".to_string());
-    }
+        if !recorder.is_recording {
+            return Err("no active recording session".to_string());
+        }
 
-    let stop_signal_arc = recorder.stop_signal.take();
-    if let Some(ref signal) = stop_signal_arc {
-        signal.store(true, Ordering::Relaxed);
-    }
-    // Clear pause so the capture thread exits cleanly.
-    if let Some(signal) = recorder.pause_signal.take() {
-        signal.store(true, Ordering::Relaxed);
-    }
+        // Signal the capture thread and any pause to stop.
+        let stop_signal_arc = recorder.stop_signal.take();
+        if let Some(ref signal) = stop_signal_arc {
+            signal.store(true, Ordering::Relaxed);
+        }
+        if let Some(signal) = recorder.pause_signal.take() {
+            signal.store(true, Ordering::Relaxed);
+        }
 
-    if let Some(handle) = recorder.handle.take() {
-        let _ = handle.join();
-    }
+        // Compute duration before any wall-clock drift.
+        let current_pause_ms = if recorder.is_paused {
+            recorder.paused_at.map(|t| t.elapsed().as_millis()).unwrap_or_default()
+        } else {
+            0
+        };
+        recorder.is_paused = false;
+        recorder.paused_at = None;
+        let duration_ms = recorder
+            .started_at
+            .map(|start| start.elapsed().as_millis())
+            .unwrap_or_default()
+            .saturating_sub(recorder.total_paused_ms)
+            .saturating_sub(current_pause_ms);
+        recorder.total_paused_ms = 0;
 
-    // Camera recording is handled by the frontend (MediaRecorder).
+        // Mark stopped immediately — all subsequent commands see the new state.
+        recorder.is_recording = false;
+        recorder.is_post_processing = true;
+        recorder.last_session_duration_ms = duration_ms;
 
-    recorder.is_recording = false;
+        // Collect frame / click counts and build persistence payloads.
+        let frames_guard = recorder
+            .raw_frames
+            .lock()
+            .map_err(|_| "failed to lock frame buffer".to_string())?;
+        let frames_captured = frames_guard.len();
+        let (source_width, source_height) = frames_guard
+            .first()
+            .map(|f| (f.width, f.height))
+            .unwrap_or((0, 0));
+        let cursor_events: Vec<CursorEventRecord> = frames_guard
+            .iter()
+            .map(|f| CursorEventRecord {
+                timestamp_ms: f.timestamp_ms,
+                x: f.cursor_x,
+                y: f.cursor_y,
+            })
+            .collect();
+        drop(frames_guard);
 
-    // Account for any ongoing pause when computing duration.
-    let current_pause_ms = if recorder.is_paused {
-        recorder.paused_at.map(|t| t.elapsed().as_millis()).unwrap_or_default()
-    } else {
-        0
-    };
-    recorder.is_paused = false;
-    recorder.paused_at = None;
+        let clicks_guard = recorder
+            .click_events
+            .lock()
+            .map_err(|_| "failed to lock click events".to_string())?;
+        let clicks_detected = clicks_guard.len();
+        let click_events_for_disk: Vec<ClickEvent> = clicks_guard.clone();
+        drop(clicks_guard);
 
-    let duration_ms = recorder
-        .started_at
-        .map(|start| start.elapsed().as_millis())
-        .unwrap_or_default()
-        .saturating_sub(recorder.total_paused_ms)
-        .saturating_sub(current_pause_ms);
-    recorder.total_paused_ms = 0;
-    recorder.last_session_duration_ms = duration_ms;
-
-    let frames_guard = recorder
-        .raw_frames
-        .lock()
-        .map_err(|_| "failed to lock frame buffer".to_string())?;
-    let frames_captured = frames_guard.len();
-
-    let clicks_guard = recorder
-        .click_events
-        .lock()
-        .map_err(|_| "failed to lock click events".to_string())?;
-    let clicks_detected = clicks_guard.len();
-
-    // Determine source dimensions from the first frame (if available).
-    let (source_width, source_height) = frames_guard
-        .first()
-        .map(|f| (f.width, f.height))
-        .unwrap_or((0, 0));
-
-    // Build per-frame cursor events for the metadata file.
-    let cursor_events: Vec<CursorEventRecord> = frames_guard
-        .iter()
-        .map(|f| CursorEventRecord {
-            timestamp_ms: f.timestamp_ms,
-            x: f.cursor_x,
-            y: f.cursor_y,
-        })
-        .collect();
-
-    // Clone click events for persistence (we release the lock immediately
-    // after to avoid holding two locks).
-    let click_events_for_disk: Vec<ClickEvent> = clicks_guard.clone();
-    drop(clicks_guard);
-    drop(frames_guard);
-
-    // Mux audio into the source video now that the capture thread has stopped.
-    let audio_handles = recorder.audio_handles.take();
-    let video_raw_path = recorder.video_raw_path.take();
-    let source_video_path_for_mux = recorder.source_video_path.clone();
-    let audio_config_snapshot = recorder.audio_config_snapshot.clone();
-
-    if let (Some(audio_handles), Some(video_raw), Some(source_video)) =
-        (audio_handles, video_raw_path, source_video_path_for_mux)
-    {
+        // Take ownership of items the background thread needs.
+        let capture_handle = recorder.handle.take();
+        let audio_handles = recorder.audio_handles.take();
+        let video_raw_path = recorder.video_raw_path.take();
+        let source_video_path_for_mux = recorder.source_video_path.clone();
+        let audio_config_snapshot = recorder.audio_config_snapshot.clone();
         let stop_for_mux = stop_signal_arc
             .clone()
             .unwrap_or_else(|| Arc::new(AtomicBool::new(true)));
-        if let Err(e) = stop_and_mux_audio(
+
+        let session_folder_str = recorder
+            .session_folder
+            .clone()
+            .ok_or_else(|| "missing session folder".to_string())?;
+
+        let project = ProjectFile {
+            version: 1,
+            session_id: std::path::Path::new(&session_folder_str)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("session")
+                .to_string(),
+            created_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            duration_ms,
+            target_fps: recorder.target_fps,
+            frames_captured,
+            clicks_detected,
+            source_width,
+            source_height,
+            source_video: Some("source.mp4".to_string()),
+            proxy_video: None,
+            cursor_events_file: "cursor_events.json".to_string(),
+            click_events_file: "click_events.json".to_string(),
+        };
+
+        recorder.proxy_path = None;
+
+        let response = StopRecordingResponse {
+            target_fps: recorder.target_fps,
+            duration_ms,
+            frames_captured,
+            clicks_detected,
+            session_folder: recorder.session_folder.clone(),
+            source_video_path: recorder.source_video_path.clone(),
+            proxy_path: None,
+            camera_video_path: recorder.camera_video_path.clone(),
+            is_processing: true,
+        };
+
+        (
+            response,
+            capture_handle,
             audio_handles,
-            &stop_for_mux,
-            std::path::Path::new(&video_raw),
-            std::path::Path::new(&source_video),
-            &audio_config_snapshot,
-        ) {
-            eprintln!("[stop_recording] audio mux failed (non-fatal): {e}");
-            // Fall back: rename video_raw to source if mux failed and source doesn't exist.
-            if !std::path::Path::new(&source_video).exists() {
-                let _ = std::fs::rename(&video_raw, &source_video);
-            }
-        }
-    }
-
-    // Persist session metadata to disk.
-    let session_folder = recorder
-        .session_folder
-        .clone()
-        .ok_or_else(|| "missing session folder".to_string())?;
-
-    let project = ProjectFile {
-        version: 1,
-        session_id: std::path::Path::new(&session_folder)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("session")
-            .to_string(),
-        created_at_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
-        duration_ms,
-        target_fps: recorder.target_fps,
-        frames_captured,
-        clicks_detected,
-        source_width,
-        source_height,
-        source_video: Some("source.mp4".to_string()),
-        proxy_video: None,
-        cursor_events_file: "cursor_events.json".to_string(),
-        click_events_file: "click_events.json".to_string(),
+            video_raw_path,
+            source_video_path_for_mux,
+            audio_config_snapshot,
+            stop_for_mux,
+            session_folder_str,
+            project,
+            click_events_for_disk,
+            cursor_events,
+        )
+        // mutex guard dropped — lock released
     };
 
-    let session_folder = Some(persist_session_in_folder(
-        std::path::Path::new(&session_folder),
-        &project,
-        &click_events_for_disk,
-        &cursor_events,
-    )?);
+    let (
+        response,
+        capture_handle,
+        audio_handles,
+        video_raw_path,
+        source_video_path_for_mux,
+        audio_config_snapshot,
+        stop_for_mux,
+        session_folder_str,
+        project,
+        click_events_for_disk,
+        cursor_events,
+    ) = bg_data;
 
-    recorder.session_folder = session_folder.clone();
-    recorder.proxy_path = None;
+    // ── Phase 2: Spawn background thread — mutex stays FREE ──────────────────
+    // The thread does all the slow work: waiting for FFmpeg to finalize the
+    // captured MP4 (seconds–minutes for long recordings), muxing audio, and
+    // writing JSON metadata.  When done it emits `smoothshot:session-updated`
+    // so the editor can load the video and dismiss its loading bar.
+    let recorder_arc = state.recorder.clone();
+    thread::spawn(move || {
+        // Wait for the capture thread (FFmpeg ddagrab) to flush and finalize.
+        if let Some(h) = capture_handle {
+            let _ = h.join();
+        }
 
-    Ok(StopRecordingResponse {
-        target_fps: recorder.target_fps,
-        duration_ms,
-        frames_captured,
-        clicks_detected,
-        session_folder,
-        source_video_path: recorder.source_video_path.clone(),
-        proxy_path: None,
-        camera_video_path: recorder.camera_video_path.clone(),
-    })
+        // Join audio threads and mux WAV files into the source MP4.
+        if let (Some(audio_handles), Some(video_raw), Some(source_video)) =
+            (audio_handles, video_raw_path, source_video_path_for_mux)
+        {
+            if let Err(e) = stop_and_mux_audio(
+                audio_handles,
+                &stop_for_mux,
+                std::path::Path::new(&video_raw),
+                std::path::Path::new(&source_video),
+                &audio_config_snapshot,
+            ) {
+                eprintln!("[stop_recording] audio mux failed (non-fatal): {e}");
+                if !std::path::Path::new(&source_video).exists() {
+                    let _ = std::fs::rename(&video_raw, &source_video);
+                }
+            }
+        }
+
+        // Persist project.json + cursor_events.json + click_events.json.
+        let canonical_folder = persist_session_in_folder(
+            std::path::Path::new(&session_folder_str),
+            &project,
+            &click_events_for_disk,
+            &cursor_events,
+        );
+
+        // Write back the canonical folder and clear the processing flag.
+        if let Ok(mut recorder) = recorder_arc.lock() {
+            recorder.is_post_processing = false;
+            if let Ok(folder) = canonical_folder {
+                recorder.session_folder = Some(folder);
+            }
+        }
+
+        // Notify the editor that the video is ready to load.
+        if let Some(editor_win) = app_handle.get_webview_window("editor") {
+            let _ = editor_win.emit("smoothshot:session-updated", ());
+        }
+    });
+
+    // ── Return immediately — editor opens with a loading bar ─────────────────
+    Ok(response)
 }
 
 #[tauri::command]
@@ -589,6 +659,7 @@ pub fn get_last_session_summary(
         source_video_path: recorder.source_video_path.clone(),
         proxy_path: recorder.proxy_path.clone(),
         camera_video_path: recorder.camera_video_path.clone(),
+        is_processing: recorder.is_post_processing,
     }))
 }
 
@@ -981,6 +1052,44 @@ pub fn set_audio_config(
     }
 
     Ok(AudioStatus::from_config(&audio))
+}
+
+// ── Countdown overlay commands ────────────────────────────────────────────────
+
+/// Show the countdown window centered on the given display area.
+/// Coordinates are in virtual-desktop physical pixels (same space as DisplayDescriptor).
+#[tauri::command]
+pub async fn show_countdown_on_display(
+    app_handle: tauri::AppHandle,
+    display_x: i32,
+    display_y: i32,
+    display_width: u32,
+    display_height: u32,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let Some(window) = app_handle.get_webview_window("countdown") else {
+        return Err("countdown window not found".to_string());
+    };
+
+    // Window is 240×240 logical px; approximate center without needing scale factor.
+    let center_x = display_x + (display_width as i32 / 2) - 120;
+    let center_y = display_y + (display_height as i32 / 2) - 120;
+    window
+        .set_position(tauri::PhysicalPosition::new(center_x, center_y))
+        .map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Hide the countdown overlay window.
+#[tauri::command]
+pub async fn hide_countdown(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app_handle.get_webview_window("countdown") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ── Window exclusion command ──────────────────────────────────────────────────

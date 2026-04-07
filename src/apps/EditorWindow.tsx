@@ -28,7 +28,7 @@ export function EditorWindow({
       <EditorHeader {...headerProps} />
 
       {/* Preview + Inspector row */}
-      <section className="grid min-h-0 overflow-hidden max-[1120px]:grid-cols-1 min-[1120px]:grid-cols-[minmax(0,1fr)_280px]">
+      <section className="grid min-h-0 overflow-hidden max-[1120px]:grid-cols-1 min-[1120px]:grid-cols-[minmax(0,1fr)_auto]">
         <EditorPreview {...previewProps} />
         <EditorInspector {...inspectorProps} />
       </section>

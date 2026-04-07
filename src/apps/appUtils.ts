@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   WINDOW_LABEL_CAMERA_PREVIEW,
+  WINDOW_LABEL_COUNTDOWN,
   WINDOW_LABEL_DISPLAY_PICKER,
   WINDOW_LABEL_EDITOR,
   WINDOW_LABEL_MAIN,
@@ -16,7 +17,8 @@ function getWindowHintFromUrl() {
     hint === WINDOW_LABEL_MAIN ||
     hint === WINDOW_LABEL_EDITOR ||
     hint === WINDOW_LABEL_DISPLAY_PICKER ||
-    hint === WINDOW_LABEL_CAMERA_PREVIEW
+    hint === WINDOW_LABEL_CAMERA_PREVIEW ||
+    hint === WINDOW_LABEL_COUNTDOWN
   ) {
     return hint;
   }
@@ -42,17 +44,9 @@ export function detectWindowLabel() {
 }
 
 export function initialViewForWindow(label: string): AppView {
-  if (label === WINDOW_LABEL_EDITOR) {
-    return "editor";
-  }
-
-  if (label === WINDOW_LABEL_DISPLAY_PICKER) {
-    return "displayPicker";
-  }
-
-  if (label === WINDOW_LABEL_CAMERA_PREVIEW) {
-    return "cameraPreview";
-  }
-
+  if (label === WINDOW_LABEL_EDITOR) return "editor";
+  if (label === WINDOW_LABEL_DISPLAY_PICKER) return "displayPicker";
+  if (label === WINDOW_LABEL_CAMERA_PREVIEW) return "cameraPreview";
+  if (label === WINDOW_LABEL_COUNTDOWN) return "countdown";
   return "launcher";
 }

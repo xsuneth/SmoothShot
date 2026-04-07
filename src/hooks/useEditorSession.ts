@@ -20,6 +20,8 @@ export interface UseEditorSessionResult {
   previewUrl: string | null;
   cameraUrl: string | null;
   previewDurationMs: number;
+  /** True while the background stop-processing thread is still running. */
+  isProcessing: boolean;
   setZoomMarkers: Dispatch<SetStateAction<ZoomMarker[]>>;
   setPreviewUrl: (url: string | null) => void;
   setPreviewDurationMs: (durationMs: number) => void;
@@ -50,6 +52,7 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [cameraUrl, setCameraUrl] = useState<string | null>(null);
   const [previewDurationMs, setPreviewDurationMs] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const refreshEditorSessionData = useCallback(async () => {
     try {
@@ -57,7 +60,7 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
         invoke<RecordingStatus>("get_recording_status"),
         invoke<ClickEvent[]>("get_click_timeline"),
         invoke<StopRecordingResponse | null>("get_last_session_summary"),
-        invoke<FrameMetadata[]>("get_frame_timeline", { limit: 5000 }),
+        invoke<FrameMetadata[]>("get_frame_timeline", { limit: 20000 }),
       ]);
 
       const normalized = normalizeSessionTiming(clicks, frameTrack);
@@ -70,8 +73,16 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
       if (summary) {
         setLastSession(summary);
         setPreviewDurationMs(summary.durationMs);
-        setPreviewUrl(summary.sourceVideoPath ? toLocalFileUrl(summary.sourceVideoPath) : null);
-        setCameraUrl(summary.cameraVideoPath ? toLocalFileUrl(summary.cameraVideoPath) : null);
+        const processing = Boolean(summary.isProcessing);
+        setIsProcessing(processing);
+        // Don't expose the video URL while the background thread is still
+        // finalizing FFmpeg / muxing audio.  The editor shows a loading bar
+        // and we re-run this function when processing completes (second
+        // smoothshot:session-updated event from the Rust background thread).
+        if (!processing) {
+          setPreviewUrl(summary.sourceVideoPath ? toLocalFileUrl(summary.sourceVideoPath) : null);
+          setCameraUrl(summary.cameraVideoPath ? toLocalFileUrl(summary.cameraVideoPath) : null);
+        }
       }
     } catch {
       // Ignore refresh errors while editor initializes.
@@ -112,6 +123,7 @@ export function useEditorSession({ windowLabel }: UseEditorSessionParams): UseEd
     previewUrl,
     cameraUrl,
     previewDurationMs,
+    isProcessing,
     setZoomMarkers,
     setPreviewUrl,
     setPreviewDurationMs,

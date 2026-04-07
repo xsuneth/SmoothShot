@@ -71,6 +71,11 @@ pub struct StopRecordingResponse {
     pub proxy_path: Option<String>,
     /// Path to the camera MP4 recorded alongside screen capture.
     pub camera_video_path: Option<String>,
+    /// True while FFmpeg finalization, audio mux, and JSON persistence are
+    /// running in the background.  The editor should show a loading state and
+    /// wait for a second `smoothshot:session-updated` event before loading the
+    /// preview video.
+    pub is_processing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,9 +102,13 @@ pub struct FrameMetadata {
     pub width: u32,
     pub height: u32,
     pub raw_bytes: usize,
+    /// Cursor X in display-local coordinates (0 = left edge of capture area).
     pub cursor_x: i32,
+    /// Cursor Y in display-local coordinates (0 = top edge of capture area).
     pub cursor_y: i32,
     pub click_in_frame: bool,
+    /// CSS-style cursor type: "default", "text", "pointer", "crosshair", etc.
+    pub cursor_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,8 +127,11 @@ pub struct RawFrame {
     pub timestamp_ms: u128,
     pub width: u32,
     pub height: u32,
+    /// Cursor position in display-local pixel coordinates (origin = top-left of capture area).
     pub cursor_x: i32,
     pub cursor_y: i32,
+    /// CSS-style cursor type string, e.g. "default", "text", "pointer".
+    pub cursor_type: &'static str,
     pub pixels_rgba: Vec<u8>,
 }
 
@@ -147,6 +159,10 @@ fn spawn_source_video_writer(
     let ffmpeg = resolve_ffmpeg()?;
     let mut command = Command::new(ffmpeg);
     command
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-nostats")
         .arg("-y")
         .arg("-f")
         .arg("rawvideo")
@@ -175,7 +191,7 @@ fn spawn_source_video_writer(
         .arg(output_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|err| format!("failed to start source video writer: {err}"))?;
 
@@ -239,6 +255,26 @@ pub fn button_name(index: usize) -> String {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn resolve_global_cursor_coords(fallback_x: i32, fallback_y: i32) -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetPhysicalCursorPos;
+
+    let mut point = POINT::default();
+    unsafe {
+        if GetPhysicalCursorPos(&mut point).is_ok() {
+            return (point.x, point.y);
+        }
+    }
+
+    (fallback_x, fallback_y)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_global_cursor_coords(fallback_x: i32, fallback_y: i32) -> (i32, i32) {
+    (fallback_x, fallback_y)
+}
+
 pub fn global_to_frame_coords(
     global_x: i32,
     global_y: i32,
@@ -277,24 +313,154 @@ pub fn resolve_capture_screen(
         .or_else(|| screens.first().copied())
 }
 
+/// Map the current Windows cursor handle to a CSS cursor-type name.
+///
+/// Uses `GetCursorInfo` to read the active cursor handle, then compares against
+/// handles returned by `LoadCursorW` for each standard system cursor.
+/// Unknown / custom cursors fall through to "default".
+#[cfg(target_os = "windows")]
+pub fn get_cursor_type() -> &'static str {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorInfo, LoadCursorW, CURSORINFO,
+        IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_NO,
+        IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+        IDC_WAIT,
+    };
+    use windows::core::PCWSTR;
+
+    unsafe {
+        let mut info = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetCursorInfo(&mut info).is_err() {
+            return "default";
+        }
+        let h = info.hCursor;
+        if h.is_invalid() {
+            return "none";
+        }
+
+        // Helper: load a system cursor and compare handles.
+        let matches = |id: PCWSTR| -> bool {
+            LoadCursorW(None, id).map_or(false, |c| c == h)
+        };
+
+        if matches(IDC_IBEAM)    { return "text"; }
+        if matches(IDC_HAND)     { return "pointer"; }
+        if matches(IDC_CROSS)    { return "crosshair"; }
+        if matches(IDC_WAIT)     { return "wait"; }
+        if matches(IDC_NO)       { return "not-allowed"; }
+        if matches(IDC_SIZEALL)  { return "move"; }
+        if matches(IDC_SIZENS)   { return "ns-resize"; }
+        if matches(IDC_SIZEWE)   { return "ew-resize"; }
+        if matches(IDC_SIZENWSE) { return "nwse-resize"; }
+        if matches(IDC_SIZENESW) { return "nesw-resize"; }
+        if matches(IDC_ARROW)    { return "default"; }
+
+        "default"
+    }
+}
+
+/// Find the ddagrab `output_idx` for a display identified by its virtual-desktop origin.
+///
+/// ddagrab enumerates DXGI adapters and outputs in order; its `output_idx` is the
+/// zero-based count across *all* adapter outputs.  The screenshots crate enumerates
+/// monitors via `EnumDisplayMonitors`, which may return them in a different order, so
+/// we must look up the DXGI index by matching desktop coordinates instead of relying
+/// on the enumeration position.
+///
+/// Falls back to 0 on any error (primary display).
+#[cfg(target_os = "windows")]
+pub fn resolve_dxgi_output_idx(display_origin_x: i32, display_origin_y: i32) -> usize {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+
+    let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+
+    let mut global_idx: usize = 0;
+    let mut adapter_n: u32 = 0;
+
+    loop {
+        let adapter = match unsafe { factory.EnumAdapters(adapter_n) } {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+
+        let mut output_n: u32 = 0;
+        loop {
+            let output = match unsafe { adapter.EnumOutputs(output_n) } {
+                Ok(o) => o,
+                Err(_) => break,
+            };
+
+            if let Ok(desc) = unsafe { output.GetDesc() } {
+                let r = desc.DesktopCoordinates;
+                if r.left == display_origin_x && r.top == display_origin_y {
+                    return global_idx;
+                }
+            }
+
+            output_n += 1;
+            global_idx += 1;
+        }
+
+        adapter_n += 1;
+    }
+
+    // No match found — fall back to the primary output.
+    0
+}
+
 pub fn build_frame_metadata(
     frames: &[RawFrame],
     clicks: &[ClickEvent],
     target_fps: u32,
     limit: usize,
 ) -> Vec<FrameMetadata> {
-    let max_items = limit.clamp(1, 5_000);
-    let start_index = frames.len().saturating_sub(max_items);
-    let selected = &frames[start_index..];
+    let max_items = limit.clamp(1, 20_000);
+    if frames.is_empty() {
+        return Vec::new();
+    }
+
+    // Keep cursor coverage across the whole recording; for long captures we
+    // sample evenly instead of returning only the tail window.
+    let selected_indices: Vec<usize> = if frames.len() <= max_items {
+        (0..frames.len()).collect()
+    } else if max_items == 1 {
+        vec![frames.len() - 1]
+    } else {
+        let last_index = frames.len() - 1;
+        let stride = last_index as f64 / (max_items - 1) as f64;
+        let mut indices = Vec::with_capacity(max_items);
+        let mut previous = usize::MAX;
+
+        for slot in 0..max_items {
+            let index = ((slot as f64 * stride).round() as usize).min(last_index);
+            if index != previous {
+                indices.push(index);
+                previous = index;
+            }
+        }
+
+        if indices.last().copied() != Some(last_index) {
+            indices.push(last_index);
+        }
+
+        indices
+    };
 
     let mut click_cursor = 0usize;
-    let mut items = Vec::with_capacity(selected.len());
+    let mut items = Vec::with_capacity(selected_indices.len());
     let frame_gap_fallback = (1000_u128 / target_fps.max(1) as u128).max(1);
 
-    for (index, frame) in selected.iter().enumerate() {
-        let next_timestamp = selected
-            .get(index + 1)
-            .map(|next| next.timestamp_ms)
+    for (slot, frame_index) in selected_indices.iter().enumerate() {
+        let frame = &frames[*frame_index];
+        let next_timestamp = selected_indices
+            .get(slot + 1)
+            .map(|next_index| frames[*next_index].timestamp_ms)
             .unwrap_or(frame.timestamp_ms + frame_gap_fallback);
 
         while click_cursor < clicks.len() && clicks[click_cursor].timestamp_ms < frame.timestamp_ms
@@ -310,7 +476,7 @@ pub fn build_frame_metadata(
             .unwrap_or(false);
 
         items.push(FrameMetadata {
-            frame_index: (start_index + index) as u64,
+            frame_index: *frame_index as u64,
             timestamp_ms: frame.timestamp_ms,
             width: frame.width,
             height: frame.height,
@@ -324,6 +490,7 @@ pub fn build_frame_metadata(
             cursor_x: frame.cursor_x,
             cursor_y: frame.cursor_y,
             click_in_frame,
+            cursor_type: frame.cursor_type.to_string(),
         });
     }
 
@@ -510,6 +677,10 @@ fn spawn_source_capture_process(
 ) -> Result<Child, String> {
     let ffmpeg = resolve_ffmpeg()?;
     Command::new(ffmpeg)
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-nostats")
         .arg("-y")
         .arg("-filter_complex")
         .arg(build_ddagrab_filter(session_capture, target_fps))
@@ -538,7 +709,7 @@ fn spawn_source_capture_process(
         .arg(output_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|err| format!("failed to start Desktop Duplication recorder: {err}"))
 }
@@ -574,6 +745,18 @@ fn capture_loop_windows(
         let mouse = device_state.get_mouse();
         let timestamp_ms = capture_started_at.elapsed().as_millis();
 
+        let (global_x, global_y) = resolve_global_cursor_coords(mouse.coords.0, mouse.coords.1);
+
+        // Convert global desktop coordinates to capture-area-local coordinates.
+        let (local_x, local_y) = global_to_frame_coords(
+            global_x,
+            global_y,
+            session_capture,
+        );
+
+        // Read cursor shape once per sample (cheap system call, cached by OS).
+        let cursor_type = get_cursor_type();
+
         let current_buttons = mouse.button_pressed;
         for (index, pressed_now) in current_buttons.iter().enumerate() {
             let pressed_before = previous_buttons.get(index).copied().unwrap_or(false);
@@ -581,8 +764,8 @@ fn capture_loop_windows(
                 if let Ok(mut events_guard) = click_events.lock() {
                     events_guard.push(ClickEvent {
                         timestamp_ms,
-                        cursor_x: mouse.coords.0,
-                        cursor_y: mouse.coords.1,
+                        cursor_x: local_x,
+                        cursor_y: local_y,
                         button: button_name(index + 1),
                     });
                 }
@@ -595,8 +778,9 @@ fn capture_loop_windows(
                 timestamp_ms,
                 width: session_capture.source_width,
                 height: session_capture.source_height,
-                cursor_x: mouse.coords.0,
-                cursor_y: mouse.coords.1,
+                cursor_x: local_x,
+                cursor_y: local_y,
+                cursor_type,
                 pixels_rgba: Vec::new(),
             });
         }
@@ -698,14 +882,23 @@ fn capture_loop_polling(
 
             last_frame_pixels = Some(pixels_rgba);
 
+            let (global_x, global_y) = resolve_global_cursor_coords(mouse.coords.0, mouse.coords.1);
+
+            // Convert global desktop coordinates to capture-area-local coordinates.
+            let (local_x, local_y) = global_to_frame_coords(
+                global_x,
+                global_y,
+                &session_capture,
+            );
+
             for (index, pressed_now) in current_buttons.iter().enumerate() {
                 let pressed_before = previous_buttons.get(index).copied().unwrap_or(false);
                 if *pressed_now && !pressed_before {
                     if let Ok(mut events_guard) = click_events.lock() {
                         events_guard.push(ClickEvent {
                             timestamp_ms,
-                            cursor_x: mouse.coords.0,
-                            cursor_y: mouse.coords.1,
+                            cursor_x: local_x,
+                            cursor_y: local_y,
                             button: button_name(index + 1),
                         });
                     }
@@ -719,8 +912,9 @@ fn capture_loop_polling(
                     timestamp_ms,
                     width,
                     height,
-                    cursor_x: mouse.coords.0,
-                    cursor_y: mouse.coords.1,
+                    cursor_x: local_x,
+                    cursor_y: local_y,
+                    cursor_type: "default",
                     pixels_rgba: Vec::new(),
                 });
             }

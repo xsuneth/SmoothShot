@@ -14,7 +14,7 @@ import type { CameraCorner, PreviewToolPanel } from "../types";
 
 export function EditorApp() {
   const [padding, setPadding] = useState(32);
-  const [scalePercent, setScalePercent] = useState(100);
+  const [scalePercent] = useState(100);
   const [audioGain, setAudioGain] = useState(100);
   const [message, setMessage] = useState("");
   const [activeToolPanel, setActiveToolPanel] = useState<PreviewToolPanel>("Background");
@@ -23,6 +23,12 @@ export function EditorApp() {
   const [cameraCorner, setCameraCorner] = useState<CameraCorner>("bottom-right");
   const [cameraRoundness, setCameraRoundness] = useState(18);
   const [cameraMirrored, setCameraMirrored] = useState(false);
+  const [roundedCorners, setRoundedCorners] = useState(18);
+  const [inset, setInset] = useState(8);
+  const [shadow, setShadow] = useState(45);
+  const [directionalShadow, setDirectionalShadow] = useState(false);
+  const [shadowAngle, setShadowAngle] = useState(135);
+  const [shadowBlur, setShadowBlur] = useState(48);
 
   const {
     status,
@@ -34,6 +40,7 @@ export function EditorApp() {
     previewUrl,
     cameraUrl,
     previewDurationMs,
+    isProcessing,
     setZoomMarkers,
     setPreviewUrl,
     setPreviewDurationMs,
@@ -120,14 +127,6 @@ export function EditorApp() {
     }
   }
 
-  async function handleOpenExportedFile() {
-    try {
-      await exportHook.openExportedFile();
-    } catch (error) {
-      setMessage(`Could not open exported file: ${String(error)}`);
-    }
-  }
-
   return (
     <EditorWindow
       headerProps={{
@@ -159,6 +158,13 @@ export function EditorApp() {
         showCursor,
         status,
         scalePercent,
+        padding,
+        roundedCorners,
+        inset,
+        shadow,
+        directionalShadow,
+        shadowAngle,
+        shadowBlur,
         zoomInMs: zoom.zoomInMs,
         zoomMarkers,
         zoomOutMs: zoom.zoomOutMs,
@@ -170,6 +176,7 @@ export function EditorApp() {
         onToggleMute: playback.toggleMutePreview,
         onTogglePlay: () => playback.togglePreviewPlayback(Boolean(previewUrl), sessionDurationMs),
         onPlaybackEnded: () => playback.setIsPlayingPreview(false),
+        isProcessing,
         onVideoError: setMessage,
       }}
       inspectorProps={{
@@ -181,30 +188,22 @@ export function EditorApp() {
         cameraMirrored,
         cameraRoundness,
         cursorScale,
-        exportPath: exportHook.exportPath,
-        holdMs: zoom.holdMs,
-        isExporting: exportHook.isExporting,
-        lastExportExists: Boolean(exportHook.lastExport),
-        maxZoom: zoom.maxZoom,
         padding,
-        scalePercent,
-        sessionDurationMs,
+        roundedCorners,
+        inset,
+        shadow,
+        directionalShadow,
+        shadowAngle,
+        shadowBlur,
         showCursor,
-        trimEndMs: trim.trimEndMs,
-        trimStartMs: trim.trimStartMs,
-        zoomInMs: zoom.zoomInMs,
-        zoomOutMs: zoom.zoomOutMs,
-        onSetTrimStartMs: trim.setTrimStartMs,
-        onSetTrimEndMs: trim.setTrimEndMs,
         onSetPadding: setPadding,
-        onSetScalePercent: setScalePercent,
-        onSetMaxZoom: zoom.setMaxZoom,
-        onSetZoomInMs: zoom.setZoomInMs,
-        onSetHoldMs: zoom.setHoldMs,
-        onSetZoomOutMs: zoom.setZoomOutMs,
+        onSetRoundedCorners: setRoundedCorners,
+        onSetInset: setInset,
+        onSetShadow: setShadow,
+        onSetDirectionalShadow: setDirectionalShadow,
+        onSetShadowAngle: setShadowAngle,
+        onSetShadowBlur: setShadowBlur,
         onSetAudioGain: setAudioGain,
-        onSetExportPath: exportHook.setExportPath,
-        onOpenExportedFile: () => void handleOpenExportedFile(),
         onSetCameraCorner: setCameraCorner,
         onSetCameraMirrored: setCameraMirrored,
         onSetCameraRoundness: setCameraRoundness,

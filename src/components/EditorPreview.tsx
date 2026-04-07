@@ -13,6 +13,98 @@ import type {
 } from "../types";
 import { backgroundCss } from "../lib/theme";
 
+// ── Cursor shape renderer ─────────────────────────────────────────────────────
+
+const SHADOW = "drop-shadow(0 3px 6px rgba(0,0,0,0.55))";
+
+function CursorIcon({ type }: { type: string }) {
+  const base = "h-8 w-8";
+  switch (type) {
+    case "text":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <line x1="12" y1="4" x2="12" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" />
+          <line x1="9" y1="4" x2="15" y2="4" stroke="white" strokeWidth="2" strokeLinecap="round" />
+          <line x1="9" y1="20" x2="15" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" />
+          <line x1="12" y1="4" x2="12" y2="20" stroke="rgba(12,14,20,0.7)" strokeWidth="3.5" strokeLinecap="round" style={{ mixBlendMode: "multiply" }} />
+        </svg>
+      );
+    case "pointer":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M8 2v12l2.5-2.5 1.5 4 2-0.7-1.5-4H16z" fill="white" stroke="rgba(12,14,20,0.85)" strokeWidth="1.2" strokeLinejoin="round" />
+        </svg>
+      );
+    case "crosshair":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <circle cx="12" cy="12" r="3" stroke="white" strokeWidth="1.5" />
+          <line x1="12" y1="2" x2="12" y2="8" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+          <line x1="12" y1="16" x2="12" y2="22" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+          <line x1="2" y1="12" x2="8" y2="12" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+          <line x1="16" y1="12" x2="22" y2="12" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      );
+    case "move":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M12 2l-2 3h4zM12 22l2-3H10zM2 12l3 2v-4zM22 12l-3-2v4zM12 2v20M2 12h20" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="white" />
+        </svg>
+      );
+    case "ns-resize":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M12 3l-3 4h6zM12 21l3-4H9zM12 3v18" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "ew-resize":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M3 12l4-3v6zM21 12l-4 3v-6zM3 12h18" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "nwse-resize":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M4 4h6M4 4v6M20 20h-6M20 20v-6M4 4l16 16" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "nesw-resize":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M20 4h-6M20 4v6M4 20h6M4 20v-6M20 4L4 20" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "not-allowed":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <circle cx="12" cy="12" r="9" stroke="white" strokeWidth="1.5" />
+          <line x1="5.6" y1="5.6" x2="18.4" y2="18.4" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      );
+    case "wait":
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path d="M7 2h10M7 22h10M8 2v4l3 3-3 4v4M16 2v4l-3 3 3 4v4" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "none":
+      return null;
+    default:
+      return (
+        <svg viewBox="0 0 24 24" className={base} fill="none" style={{ filter: SHADOW }}>
+          <path
+            d="M6 3.5 16.5 14l-4.3.9 1.9 5.6-2.7.9-1.9-5.5-3.8 2L6 3.5Z"
+            fill="white"
+            stroke="rgba(12,14,20,0.85)"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+  }
+}
+
 type EditorPreviewProps = {
   activeToolPanel: PreviewToolPanel;
   backgroundStyle: BackgroundStyle;
@@ -26,8 +118,16 @@ type EditorPreviewProps = {
   gpuStatus: GpuInitStatus | null;
   isPlaying: boolean;
   isMuted: boolean;
+  isProcessing?: boolean;
   maxZoom: number;
   previewUrl: string | null;
+  padding: number;
+  roundedCorners: number;
+  inset: number;
+  shadow: number;
+  directionalShadow: boolean;
+  shadowAngle: number;
+  shadowBlur: number;
   scalePercent: number;
   sessionDurationMs: number;
   showCursor: boolean;
@@ -53,12 +153,6 @@ function easeInOut(progress: number) {
   return -(Math.cos(Math.PI * progress) - 1) / 2;
 }
 
-function cubicBlend(p0: number, p1: number, p2: number, p3: number, t: number) {
-  const t2 = t * t;
-  const t3 = t2 * t;
-  return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
-}
-
 function interpolateCursor(cursorTrack: FrameMetadata[], currentTimeMs: number) {
   if (cursorTrack.length === 0) return null;
   if (cursorTrack.length === 1 || currentTimeMs <= cursorTrack[0].timestampMs) return cursorTrack[0];
@@ -73,15 +167,13 @@ function interpolateCursor(cursorTrack: FrameMetadata[], currentTimeMs: number) 
 
   const left = cursorTrack[leftIndex];
   const right = cursorTrack[Math.min(leftIndex + 1, cursorTrack.length - 1)];
-  const before = cursorTrack[Math.max(leftIndex - 1, 0)];
-  const after = cursorTrack[Math.min(leftIndex + 2, cursorTrack.length - 1)];
   const span = Math.max(right.timestampMs - left.timestampMs, 1);
   const blend = clamp((currentTimeMs - left.timestampMs) / span, 0, 1);
 
   return {
     ...left,
-    cursorX: Math.round(cubicBlend(before.cursorX, left.cursorX, right.cursorX, after.cursorX, blend)),
-    cursorY: Math.round(cubicBlend(before.cursorY, left.cursorY, right.cursorY, after.cursorY, blend)),
+    cursorX: Math.round(left.cursorX + (right.cursorX - left.cursorX) * blend),
+    cursorY: Math.round(left.cursorY + (right.cursorY - left.cursorY) * blend),
   };
 }
 
@@ -135,8 +227,16 @@ export function EditorPreview({
   gpuStatus,
   isPlaying,
   isMuted,
+  isProcessing,
   maxZoom,
   previewUrl,
+  padding,
+  roundedCorners,
+  inset,
+  shadow,
+  directionalShadow,
+  shadowAngle,
+  shadowBlur,
   scalePercent,
   sessionDurationMs,
   showCursor,
@@ -159,33 +259,113 @@ export function EditorPreview({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const currentTimeRef = useRef(currentTimeMs);
   const requestSequenceRef = useRef(0);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // How many auto-retries have fired for the current source URL.
+  const retryCountRef = useRef(0);
+  // Time (seconds) to seek to after a retry remount, so playback resumes at the right position.
+  const retryRestoreTimeRef = useRef(0);
+  // Whether playback was active at the moment the error fired.
+  const retryWasPlayingRef = useRef(false);
   const [previewFrame, setPreviewFrame] = useState<PreviewFrameResponse | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
+  // Bumped on each retry attempt to remount the <video> element with a fresh src.
+  const [videoRetryKey, setVideoRetryKey] = useState(0);
+  const [mediaDurationMs, setMediaDurationMs] = useState(0);
   const [mediaDimensions, setMediaDimensions] = useState<{ width: number; height: number } | null>(null);
   const [stageSize, setStageSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const stageBackground = backgroundCss(backgroundStyle);
 
-  const activeCursor = useMemo(() => interpolateCursor(cursorTrack, currentTimeMs), [cursorTrack, currentTimeMs]);
-  const sourceWidth = mediaDimensions?.width ?? previewFrame?.width ?? activeCursor?.width ?? cursorTrack[0]?.width ?? 1920;
-  const sourceHeight = mediaDimensions?.height ?? previewFrame?.height ?? activeCursor?.height ?? cursorTrack[0]?.height ?? 1080;
+  const orderedCursorTrack = useMemo(
+    () => [...cursorTrack].sort((left, right) => left.timestampMs - right.timestampMs),
+    [cursorTrack],
+  );
+
+  const cursorTimelineRange = useMemo(() => {
+    if (orderedCursorTrack.length === 0) return null;
+    const firstTimestampMs = orderedCursorTrack[0].timestampMs;
+    const lastTimestampMs = orderedCursorTrack[orderedCursorTrack.length - 1].timestampMs;
+    return {
+      firstTimestampMs,
+      spanMs: Math.max(1, lastTimestampMs - firstTimestampMs),
+    };
+  }, [orderedCursorTrack]);
+
+  const playbackDurationMs = Math.max(
+    1,
+    previewUrl && mediaDurationMs > 0 ? mediaDurationMs : sessionDurationMs,
+  );
+
+  const cursorTimelineTimeMs = useMemo(() => {
+    if (!cursorTimelineRange) return currentTimeMs;
+    const clampedPlaybackTime = clamp(currentTimeMs, 0, playbackDurationMs);
+    const progress = clampedPlaybackTime / playbackDurationMs;
+    return cursorTimelineRange.firstTimestampMs + cursorTimelineRange.spanMs * progress;
+  }, [cursorTimelineRange, currentTimeMs, playbackDurationMs]);
+
+  const activeCursor = useMemo(
+    () => interpolateCursor(orderedCursorTrack, cursorTimelineTimeMs),
+    [orderedCursorTrack, cursorTimelineTimeMs],
+  );
+  // Cursor coordinates come from frame metadata, so normalize against that space first.
+  const sourceWidth = activeCursor?.width ?? orderedCursorTrack[0]?.width ?? mediaDimensions?.width ?? previewFrame?.width ?? 1920;
+  const sourceHeight = activeCursor?.height ?? orderedCursorTrack[0]?.height ?? mediaDimensions?.height ?? previewFrame?.height ?? 1080;
   const previewAspectRatio =
     mediaDimensions?.width && mediaDimensions?.height
       ? mediaDimensions.width / mediaDimensions.height
       : previewFrame?.width && previewFrame?.height
         ? previewFrame.width / previewFrame.height
         : 16 / 9;
-  const cursorLeft = activeCursor ? clamp((activeCursor.cursorX / sourceWidth) * 100, 0, 100) : 50;
-  const cursorTop = activeCursor ? clamp((activeCursor.cursorY / sourceHeight) * 100, 0, 100) : 50;
+  const cursorInBounds =
+    Boolean(activeCursor) &&
+    activeCursor!.cursorX >= 0 &&
+    activeCursor!.cursorX < sourceWidth &&
+    activeCursor!.cursorY >= 0 &&
+    activeCursor!.cursorY < sourceHeight &&
+    activeCursor!.cursorType !== "none";
+  const cursorLeft = activeCursor ? (activeCursor.cursorX / sourceWidth) * 100 : 50;
+  const cursorTop = activeCursor ? (activeCursor.cursorY / sourceHeight) * 100 : 50;
 
   const { zoom, marker: zoomFocusMarker } = useMemo(
     () => liveZoomState(zoomMarkers, currentTimeMs, zoomInMs, zoomOutMs, maxZoom),
     [zoomMarkers, currentTimeMs, zoomInMs, zoomOutMs, maxZoom],
   );
 
-  const focusXPercent = zoomFocusMarker && activeCursor ? clamp((activeCursor.cursorX / sourceWidth) * 100, 5, 95) : 50;
-  const focusYPercent = zoomFocusMarker && activeCursor ? clamp((activeCursor.cursorY / sourceHeight) * 100, 5, 95) : 50;
+  const focusXPercent = zoomFocusMarker && activeCursor && cursorInBounds
+    ? clamp((activeCursor.cursorX / sourceWidth) * 100, 5, 95)
+    : 50;
+  const focusYPercent = zoomFocusMarker && activeCursor && cursorInBounds
+    ? clamp((activeCursor.cursorY / sourceHeight) * 100, 5, 95)
+    : 50;
   const translateX = (50 - focusXPercent) * (zoom - 1);
   const translateY = (50 - focusYPercent) * (zoom - 1);
+  const effectiveInset = Math.max(0, Math.min(220, padding + inset));
+  const shadowOpacity = Math.min(1, Math.max(0, shadow / 100));
+  const shadowDistance = directionalShadow ? 28 : 0;
+  const shadowRadians = (shadowAngle * Math.PI) / 180;
+  const shadowX = Math.round(Math.cos(shadowRadians) * shadowDistance);
+  const shadowY = Math.round(Math.sin(shadowRadians) * shadowDistance);
+  const frameShadow = directionalShadow
+    ? `${shadowX}px ${shadowY}px ${shadowBlur}px rgba(0,0,0,${(0.85 * shadowOpacity).toFixed(3)})`
+    : `0 16px ${shadowBlur}px rgba(0,0,0,${(0.85 * shadowOpacity).toFixed(3)})`;
+  const frameSize = useMemo(() => {
+    const availableWidth = Math.max(0, stageSize.width - effectiveInset * 2);
+    const availableHeight = Math.max(0, stageSize.height - effectiveInset * 2);
+
+    if (availableWidth <= 0 || availableHeight <= 0) {
+      return { width: 0, height: 0 };
+    }
+
+    const availableRatio = availableWidth / availableHeight;
+    if (availableRatio > previewAspectRatio) {
+      const height = availableHeight;
+      const width = Math.round(height * previewAspectRatio);
+      return { width, height };
+    }
+
+    const width = availableWidth;
+    const height = Math.round(width / previewAspectRatio);
+    return { width, height };
+  }, [stageSize.width, stageSize.height, effectiveInset, previewAspectRatio]);
   const cameraCornerClass = useMemo(() => {
     if (cameraCorner === "top-left") return "top-3 left-3";
     if (cameraCorner === "top-right") return "top-3 right-3";
@@ -323,6 +503,9 @@ export function EditorPreview({
   useEffect(() => {
     if (previewUrl) {
       setMediaDimensions(null);
+      setMediaDurationMs(0);
+      retryCountRef.current = 0;
+      retryRestoreTimeRef.current = 0;
     }
   }, [previewUrl]);
 
@@ -396,9 +579,12 @@ export function EditorPreview({
             />
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08),transparent_55%)]" />
             <div
-              className="relative z-10 w-[92%] max-h-[92%] overflow-visible rounded-[18px] border border-white/10 bg-black/40 shadow-[0_16px_50px_rgba(0,0,0,0.4)] transition-transform duration-200"
+              className="relative z-10 overflow-visible border border-white/10 bg-black/40 transition-transform duration-200"
               style={{
-                aspectRatio: previewAspectRatio,
+                width: `${frameSize.width}px`,
+                height: `${frameSize.height}px`,
+                borderRadius: `${roundedCorners}px`,
+                boxShadow: frameShadow,
                 transform: `scale(${scalePercent / 100})`,
               }}
             >
@@ -409,23 +595,93 @@ export function EditorPreview({
               >
                 {previewUrl ? (
                   <video
+                    key={`${previewUrl}-${videoRetryKey}`}
                     ref={videoRef}
-                    className="h-full w-full object-cover"
+                    className="h-full w-full object-contain"
                     src={previewUrl}
                     playsInline
                     preload="auto"
                     onLoadedMetadata={(e) => {
-                      onDurationChange(e.currentTarget.duration * 1000);
+                      if (retryTimerRef.current) {
+                        clearTimeout(retryTimerRef.current);
+                        retryTimerRef.current = null;
+                      }
+                      const durationMs = Number.isFinite(e.currentTarget.duration)
+                        ? e.currentTarget.duration * 1000
+                        : 0;
+                      setMediaDurationMs(durationMs);
+                      onDurationChange(durationMs);
                       if (e.currentTarget.videoWidth > 0 && e.currentTarget.videoHeight > 0) {
                         setMediaDimensions({
                           width: e.currentTarget.videoWidth,
                           height: e.currentTarget.videoHeight,
                         });
                       }
+                      // After a retry remount, seek to slightly before where the error
+                      // happened.  Seeking to the exact same position would hit the same
+                      // corrupt/undecodable region again every retry, causing a visible
+                      // flash loop.  Jumping back ensures we land on the prior keyframe
+                      // (keyframe interval is ~1 s) so the decoder gets a clean start.
+                      if (retryRestoreTimeRef.current > 0) {
+                        const errorTime = retryRestoreTimeRef.current;
+                        retryRestoreTimeRef.current = 0;
+                        // Seek progressively further back on each successive retry so
+                        // persistent bad regions are skipped rather than replayed.
+                        const stepBack = Math.min(retryCountRef.current * 2, 10);
+                        e.currentTarget.currentTime = Math.max(0, errorTime - stepBack);
+                        if (retryWasPlayingRef.current) {
+                          void e.currentTarget.play().catch(() => {});
+                        }
+                      }
+                    }}
+                    onPlaying={() => {
+                      // Successful playback — reset retry budget.
+                      retryCountRef.current = 0;
+                    }}
+                    onStalled={(e) => {
+                      // Video stalled (e.g. Chromium stops buffering mid-seek on Windows).
+                      // Retry only if actually playing or the stall persists; give it 3 s first.
+                      if (retryCountRef.current >= 8) return;
+                      if (retryTimerRef.current) return; // already scheduled
+                      retryTimerRef.current = window.setTimeout(() => {
+                        const video = e.currentTarget;
+                        if (!video) return;
+                        // If still stalled (readyState < HAVE_FUTURE_DATA), remount.
+                        if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+                          retryRestoreTimeRef.current = video.currentTime;
+                          retryWasPlayingRef.current = !video.paused;
+                          retryCountRef.current += 1;
+                          setVideoRetryKey((k) => k + 1);
+                        }
+                        retryTimerRef.current = null;
+                      }, 3000);
                     }}
                     onEnded={onPlaybackEnded}
                     onError={(e) => {
                       const code = e.currentTarget.error?.code;
+                      const MAX_RETRIES = 8;
+                      // Retry all recoverable error codes. Decode errors during playback
+                      // are common on Windows (asset.localhost range-request / moov-at-end)
+                      // and almost always resolve on a fresh element load.
+                      const isRetryable =
+                        code === MediaError.MEDIA_ERR_NETWORK ||
+                        code === MediaError.MEDIA_ERR_ABORTED ||
+                        code === MediaError.MEDIA_ERR_DECODE;
+                      if (isRetryable && retryCountRef.current < MAX_RETRIES) {
+                        retryRestoreTimeRef.current = e.currentTarget.currentTime;
+                        retryWasPlayingRef.current = !e.currentTarget.paused;
+                        retryCountRef.current += 1;
+                        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+                        // Decode errors are usually transient — short delay. Network errors need
+                        // longer to let the file finish flushing.
+                        const delay = code === MediaError.MEDIA_ERR_DECODE ? 300 : 1500;
+                        retryTimerRef.current = window.setTimeout(() => {
+                          setVideoRetryKey((k) => k + 1);
+                        }, delay);
+                        return;
+                      }
+                      // Exhausted retries or truly unrecoverable (unsupported source).
+                      retryCountRef.current = 0;
                       const reason =
                         code === MediaError.MEDIA_ERR_ABORTED ? "aborted" :
                         code === MediaError.MEDIA_ERR_NETWORK ? "network" :
@@ -436,7 +692,7 @@ export function EditorPreview({
                     }}
                   />
                 ) : previewFrame ? (
-                  <canvas ref={canvasRef} className="h-full w-full object-cover" />
+                  <canvas ref={canvasRef} className="h-full w-full object-contain" />
                 ) : (
                   <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,#36285a_0%,#241b3f_44%,#191726_100%)]">
                     <div className="max-w-140 text-center text-white">
@@ -450,29 +706,21 @@ export function EditorPreview({
                     </div>
                   </div>
                 )}
-              </div>
 
-              {/* Cursor overlay */}
-              <div className="pointer-events-none absolute inset-0 z-20">
-                {showCursor && activeCursor && (
+                {/* Cursor overlay — lives INSIDE the zoom transform so it pans/scales with the video */}
+                {showCursor && activeCursor && cursorInBounds && (
                   <div
-                    className="absolute -translate-x-[18%] -translate-y-[12%]"
-                    style={{ left: `${cursorLeft}%`, top: `${cursorTop}%` }}
+                    className="pointer-events-none absolute z-20"
+                    style={{
+                      left: `${cursorLeft}%`,
+                      top: `${cursorTop}%`,
+                      transform: `translate(-18%, -12%) scale(${cursorScale / 100})`,
+                      transformOrigin: "0 0",
+                    }}
                   >
-                    <svg
-                      viewBox="0 0 24 24"
-                      className="h-8 w-8 drop-shadow-[0_8px_14px_rgba(0,0,0,0.5)]"
-                      style={{ transform: `scale(${cursorScale / 100})` }}
-                      fill="none"
-                    >
-                      <path
-                        d="M6 3.5 16.5 14l-4.3.9 1.9 5.6-2.7.9-1.9-5.5-3.8 2L6 3.5Z"
-                        fill="white"
-                        stroke="rgba(12,14,20,0.85)"
-                        strokeWidth="1.2"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
+                    <CursorIcon
+                      type={activeCursor.cursorType ?? "default"}
+                    />
                   </div>
                 )}
               </div>
@@ -497,6 +745,18 @@ export function EditorPreview({
               </div>
             )}
             </div>
+
+            {/* Processing overlay — shown while FFmpeg is finalizing after stop */}
+            {isProcessing && (
+              <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 rounded-[18px] bg-[rgba(8,9,15,0.82)] backdrop-blur-sm">
+                <p className="text-sm font-medium tracking-wide text-white/70">Finalizing recording</p>
+                {/* Indeterminate progress bar */}
+                <div className="relative h-1 w-48 overflow-hidden rounded-full bg-white/10">
+                  <div className="absolute inset-y-0 w-1/2 animate-[shimmer_1.4s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+                </div>
+                <p className="text-xs text-white/35">This may take a moment for longer recordings</p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -539,26 +799,13 @@ export function EditorPreview({
                 </>
               ),
             },
-            {
-              title: "Layout",
-              icon: (
-                <>
-                  <rect x="3" y="3" width="18" height="18" rx="2" />
-                  <path d="M3 9h18M9 9v12" />
-                </>
-              ),
-            },
           ].map(({ title, icon }) => (
             <button
               key={title}
               type="button"
               title={title}
               className={`rounded-lg p-2 transition hover:bg-white/6 hover:text-white/90 ${activeToolPanel === title ? "bg-white/10 text-white" : ""}`}
-              onClick={() => {
-                if (title === "Background" || title === "Cursor" || title === "Camera") {
-                  onSetActiveToolPanel(title);
-                }
-              }}
+              onClick={() => onSetActiveToolPanel(title as PreviewToolPanel)}
             >
               <svg viewBox="0 0 24 24" className="h-4.5 w-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 {icon}

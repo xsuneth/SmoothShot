@@ -57,9 +57,10 @@ export function clickEventsToMarkers(clicks: ClickEvent[], durationMs: number): 
 }
 
 export function normalizeSessionTiming(clicks: ClickEvent[], frameTrack: FrameMetadata[]) {
-  const firstFrameTime = frameTrack[0]?.timestampMs ?? Number.POSITIVE_INFINITY;
+  const firstFrameTime = frameTrack[0]?.timestampMs ?? Number.NaN;
   const firstClickTime = clicks[0]?.timestampMs ?? Number.POSITIVE_INFINITY;
-  const zeroPoint = Math.min(firstFrameTime, firstClickTime);
+  // Anchor editor time to frame/video timeline first so cursor stays synced.
+  const zeroPoint = Number.isFinite(firstFrameTime) ? firstFrameTime : firstClickTime;
 
   if (!Number.isFinite(zeroPoint) || zeroPoint <= 0) {
     return { clicks, frameTrack };

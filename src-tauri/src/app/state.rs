@@ -54,12 +54,17 @@ pub struct RecorderInner {
     pub audio_handles: Option<AudioCaptureHandles>,
     /// AudioConfig snapshot taken at recording start (needed at stop time for mux).
     pub audio_config_snapshot: AudioConfig,
+    /// True while the background stop-processing thread (FFmpeg flush, audio mux,
+    /// JSON persist) is still running after stop_recording returned.
+    pub is_post_processing: bool,
 }
 
 // ── Top-level app state ───────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub recorder: Mutex<RecorderInner>,
+    /// Wrapped in Arc so the background stop-processing thread can hold a
+    /// clone and write `is_post_processing = false` when done.
+    pub recorder: Arc<Mutex<RecorderInner>>,
     pub gpu_renderer: Mutex<GpuRendererState>,
     pub audio_config: Mutex<AudioConfig>,
     pub mic_meter_stop: Mutex<Option<Arc<AtomicBool>>>,
@@ -91,6 +96,7 @@ impl Default for RecorderInner {
             video_raw_path: None,
             audio_handles: None,
             audio_config_snapshot: AudioConfig::default(),
+            is_post_processing: false,
         }
     }
 }
@@ -98,7 +104,7 @@ impl Default for RecorderInner {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            recorder: Mutex::new(RecorderInner::default()),
+            recorder: Arc::new(Mutex::new(RecorderInner::default())),
             gpu_renderer: Mutex::new(GpuRendererState::default()),
             audio_config: Mutex::new(AudioConfig::default()),
             mic_meter_stop: Mutex::new(None),

@@ -115,6 +115,7 @@ export function useCameraPreviewWindow({ selectedCameraDevice }: UseCameraPrevie
   const hideCameraPreviewWindow = useCallback(async () => {
     const popup = await WebviewWindow.getByLabel(WINDOW_LABEL_CAMERA_PREVIEW);
     if (popup) {
+      await popup.emit(EVT_CAMERA_PREVIEW_DATA, { selectedCameraDevice: null }).catch(() => {});
       await popup.hide().catch(() => {});
     }
   }, []);

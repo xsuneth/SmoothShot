@@ -36,6 +36,12 @@ export type StopRecordingResponse = {
   proxyPath: string | null;
   /** Path to the camera MP4 recorded alongside screen capture. */
   cameraVideoPath: string | null;
+  /**
+   * True while FFmpeg finalization, audio mux, and JSON persistence run in the
+   * background.  The editor shows a loading bar and sets previewUrl only after
+   * this becomes false (signalled by a second `smoothshot:session-updated`).
+   */
+  isProcessing?: boolean;
 };
 
 export type ClickEvent = {
@@ -98,7 +104,7 @@ export type DisplayDescriptor = {
 };
 
 export type LauncherMode = "display" | "window" | "area";
-export type AppView = "launcher" | "editor" | "displayPicker" | "cameraPreview";
+export type AppView = "launcher" | "editor" | "displayPicker" | "cameraPreview" | "countdown";
 
 export type ZoomMarker = {
   id: string;
@@ -115,7 +121,7 @@ export type BackgroundStyle = {
   blur: number;
 };
 
-export type PreviewToolPanel = "Background" | "Cursor" | "Camera";
+export type PreviewToolPanel = "Background" | "Cursor" | "Camera" | "Caption" | "Audio";
 export type CameraCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
 export type GeneratePreviewProxyResponse = {
@@ -132,9 +138,13 @@ export type FrameMetadata = {
   width: number;
   height: number;
   rawBytes: number;
+  /** Display-local X coordinate (0 = left edge of capture area). */
   cursorX: number;
+  /** Display-local Y coordinate (0 = top edge of capture area). */
   cursorY: number;
   clickInFrame: boolean;
+  /** CSS cursor name: "default" | "text" | "pointer" | "crosshair" | "move" | "wait" | "not-allowed" | "*-resize" */
+  cursorType: string;
 };
 
 export type PreviewFrameResponse = {

@@ -86,6 +86,7 @@ export function LauncherApp() {
     deleteRecording,
   } = useRecordingFlow({
     launcherMode,
+    displays,
     displaySelection,
     fps,
     region,
