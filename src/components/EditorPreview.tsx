@@ -18,7 +18,7 @@ import { backgroundCss } from "../lib/theme";
 const SHADOW = "drop-shadow(0 3px 6px rgba(0,0,0,0.55))";
 
 function CursorIcon({ type }: { type: string }) {
-  const base = "h-8 w-8";
+  const base = "h-[clamp(18px,3.2cqh,36px)] w-[clamp(18px,3.2cqh,36px)]";
   switch (type) {
     case "text":
       return (
@@ -253,7 +253,6 @@ export function EditorPreview({
   onTogglePlay,
   onVideoError,
 }: EditorPreviewProps) {
-  const stageContainerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cameraRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -272,7 +271,6 @@ export function EditorPreview({
   const [videoRetryKey, setVideoRetryKey] = useState(0);
   const [mediaDurationMs, setMediaDurationMs] = useState(0);
   const [mediaDimensions, setMediaDimensions] = useState<{ width: number; height: number } | null>(null);
-  const [stageSize, setStageSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const stageBackground = backgroundCss(backgroundStyle);
 
   const orderedCursorTrack = useMemo(
@@ -347,30 +345,12 @@ export function EditorPreview({
   const frameShadow = directionalShadow
     ? `${shadowX}px ${shadowY}px ${shadowBlur}px rgba(0,0,0,${(0.85 * shadowOpacity).toFixed(3)})`
     : `0 16px ${shadowBlur}px rgba(0,0,0,${(0.85 * shadowOpacity).toFixed(3)})`;
-  const frameSize = useMemo(() => {
-    const availableWidth = Math.max(0, stageSize.width - effectiveInset * 2);
-    const availableHeight = Math.max(0, stageSize.height - effectiveInset * 2);
-
-    if (availableWidth <= 0 || availableHeight <= 0) {
-      return { width: 0, height: 0 };
-    }
-
-    const availableRatio = availableWidth / availableHeight;
-    if (availableRatio > previewAspectRatio) {
-      const height = availableHeight;
-      const width = Math.round(height * previewAspectRatio);
-      return { width, height };
-    }
-
-    const width = availableWidth;
-    const height = Math.round(width / previewAspectRatio);
-    return { width, height };
-  }, [stageSize.width, stageSize.height, effectiveInset, previewAspectRatio]);
-  const cameraCornerClass = useMemo(() => {
-    if (cameraCorner === "top-left") return "top-3 left-3";
-    if (cameraCorner === "top-right") return "top-3 right-3";
-    if (cameraCorner === "bottom-left") return "bottom-3 left-3";
-    return "bottom-3 right-3";
+  const cameraInset = "clamp(8px, 2.5cqw, 18px)";
+  const cameraCornerStyle = useMemo(() => {
+    if (cameraCorner === "top-left") return { top: cameraInset, left: cameraInset };
+    if (cameraCorner === "top-right") return { top: cameraInset, right: cameraInset };
+    if (cameraCorner === "bottom-left") return { bottom: cameraInset, left: cameraInset };
+    return { bottom: cameraInset, right: cameraInset };
   }, [cameraCorner]);
 
   useEffect(() => {
@@ -509,34 +489,6 @@ export function EditorPreview({
     }
   }, [previewUrl]);
 
-  useEffect(() => {
-    const container = stageContainerRef.current;
-    if (!container) return;
-
-    const updateStageSize = () => {
-      const width = container.clientWidth;
-      const height = container.clientHeight;
-      if (width <= 0 || height <= 0) return;
-
-      const containerRatio = width / height;
-      if (containerRatio > previewAspectRatio) {
-        const nextHeight = height;
-        const nextWidth = Math.round(height * previewAspectRatio);
-        setStageSize({ width: nextWidth, height: nextHeight });
-      } else {
-        const nextWidth = width;
-        const nextHeight = Math.round(width / previewAspectRatio);
-        setStageSize({ width: nextWidth, height: nextHeight });
-      }
-    };
-
-    updateStageSize();
-    const observer = new ResizeObserver(updateStageSize);
-    observer.observe(container);
-
-    return () => observer.disconnect();
-  }, [previewAspectRatio]);
-
   return (
     <article className="grid min-h-0 grid-rows-[auto_1fr_auto] rounded-r-[18px] bg-[#05060b]">
       <div className="flex h-12 items-center justify-center gap-6 border-b border-white/6 text-sm text-white/82">
@@ -563,26 +515,22 @@ export function EditorPreview({
       </div>
 
       <div className="grid min-h-0 grid-cols-[1fr_44px]">
-        <div className="flex min-h-0 items-center justify-center p-3">
-          <div ref={stageContainerRef} className="relative h-full w-full">
-            <div
-              className="absolute inset-0 m-auto flex items-center justify-center overflow-hidden rounded-[18px] shadow-[0_20px_60px_rgba(0,0,0,0.45)] transition-all duration-200"
-              style={{
-                background: stageBackground,
-                width: `${stageSize.width}px`,
-                height: `${stageSize.height}px`,
-              }}
-            >
-            <div
-              className="absolute inset-0 scale-110"
-              style={{ background: stageBackground, filter: `blur(${backgroundStyle.blur}px)` }}
-            />
+        <div className="flex min-h-0 items-center justify-center p-3" style={{ containerType: "size" }}>
+          <div
+            className="relative flex shrink-0 items-center justify-center overflow-hidden rounded-[18px] shadow-[0_20px_60px_rgba(0,0,0,0.45)] transition-all duration-200"
+            style={{
+              background: stageBackground,
+              aspectRatio: previewAspectRatio,
+              width: `min(100cqw, calc(100cqh * ${previewAspectRatio}))`,
+              containerType: "size",
+            }}
+          >
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.08),transparent_55%)]" />
             <div
-              className="relative z-10 overflow-visible border border-white/10 bg-black/40 transition-transform duration-200"
+              className="relative z-10 shrink-0 overflow-visible border border-white/10 bg-black/40 transition-transform duration-200"
               style={{
-                width: `${frameSize.width}px`,
-                height: `${frameSize.height}px`,
+                aspectRatio: previewAspectRatio,
+                width: `min(calc(100cqw - ${effectiveInset * 2}px), calc((100cqh - ${effectiveInset * 2}px) * ${previewAspectRatio}))`,
                 borderRadius: `${roundedCorners}px`,
                 boxShadow: frameShadow,
                 transform: `scale(${scalePercent / 100})`,
@@ -707,6 +655,7 @@ export function EditorPreview({
                   </div>
                 )}
 
+                          containerType: "size",
                 {/* Cursor overlay — lives INSIDE the zoom transform so it pans/scales with the video */}
                 {showCursor && activeCursor && cursorInBounds && (
                   <div
@@ -729,30 +678,37 @@ export function EditorPreview({
 
             {/* Camera PiP overlay on full preview canvas */}
             {cameraUrl && (
-              <div className={`pointer-events-none absolute z-30 ${cameraCornerClass}`}>
-                <video
-                  ref={cameraRef}
-                  className="h-28 w-[7.5rem] object-cover shadow-[0_6px_24px_rgba(0,0,0,0.7)] ring-1 ring-white/25"
+              <div className="pointer-events-none absolute z-30" style={cameraCornerStyle}>
+                <div
+                  className="overflow-hidden shadow-[0_6px_24px_rgba(0,0,0,0.7)] ring-1 ring-white/25"
                   style={{
+                    width: "clamp(88px, 18cqw, 160px)",
+                    aspectRatio: "15 / 14",
                     borderRadius: `${cameraRoundness}px`,
-                    transform: cameraMirrored ? "scaleX(-1)" : "none",
                   }}
-                  src={cameraUrl}
-                  playsInline
-                  preload="auto"
-                  muted
-                />
+                >
+                  <video
+                    ref={cameraRef}
+                    className="h-full w-full object-cover"
+                    style={{
+                      transform: cameraMirrored ? "scaleX(-1)" : "none",
+                    }}
+                    src={cameraUrl}
+                    playsInline
+                    preload="auto"
+                    muted
+                  />
+                </div>
               </div>
             )}
-            </div>
 
             {/* Processing overlay — shown while FFmpeg is finalizing after stop */}
             {isProcessing && (
-              <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 rounded-[18px] bg-[rgba(8,9,15,0.82)] backdrop-blur-sm">
+              <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-4 rounded-[18px] bg-[rgba(8,9,15,0.88)]">
                 <p className="text-sm font-medium tracking-wide text-white/70">Finalizing recording</p>
                 {/* Indeterminate progress bar */}
                 <div className="relative h-1 w-48 overflow-hidden rounded-full bg-white/10">
-                  <div className="absolute inset-y-0 w-1/2 animate-[shimmer_1.4s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+                  <div className="absolute inset-y-0 w-1/2 animate-[shimmer_1.4s_ease-in-out_infinite] rounded-full bg-linear-to-r from-transparent via-white/60 to-transparent" />
                 </div>
                 <p className="text-xs text-white/35">This may take a moment for longer recordings</p>
               </div>

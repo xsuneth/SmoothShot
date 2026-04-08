@@ -3,6 +3,7 @@ import type { ComponentProps } from "react";
 import { EditorHeader } from "../components/EditorHeader";
 import { EditorInspector } from "../components/EditorInspector";
 import { EditorPreview } from "../components/EditorPreview";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { ExportResult } from "../components/ExportResult";
 import { TimelinePanel } from "../components/TimelinePanel";
 
@@ -29,7 +30,9 @@ export function EditorWindow({
 
       {/* Preview + Inspector row */}
       <section className="grid min-h-0 overflow-hidden max-[1120px]:grid-cols-1 min-[1120px]:grid-cols-[minmax(0,1fr)_auto]">
-        <EditorPreview {...previewProps} />
+        <ErrorBoundary>
+          <EditorPreview {...previewProps} />
+        </ErrorBoundary>
         <EditorInspector {...inspectorProps} />
       </section>
 

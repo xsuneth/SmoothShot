@@ -9,7 +9,8 @@
       "WebFetch(domain:crates.io)",
       "WebSearch",
       "Bash(grep:*)",
-      "Bash(bun run:*)"
+      "Bash(bun run:*)",
+      "mcp__ide__getDiagnostics"
     ]
   }
 }
