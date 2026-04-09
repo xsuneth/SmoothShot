@@ -14,8 +14,8 @@ use serde::Deserialize;
 
 use crate::app::state::AppState;
 use crate::audio::{
-    extract_audio_waveform_peaks, list_dshow_video_devices, list_input_mic_devices,
-    start_audio_capture, stop_and_mux_audio, AudioConfig, AudioStatus,
+    list_dshow_video_devices, list_input_mic_devices, start_audio_capture, stop_and_mux_audio,
+    AudioConfig, AudioStatus,
 };
 use crate::capture::{
     build_frame_metadata, capture_loop, resolve_capture_screen, ClickEvent, DisplayDescriptor,
@@ -1009,28 +1009,6 @@ pub fn get_audio_status(state: tauri::State<'_, AppState>) -> Result<AudioStatus
         .map_err(|_| "failed to lock audio config".to_string())?;
 
     Ok(AudioStatus::from_config(&config))
-}
-
-#[tauri::command]
-pub fn get_audio_waveform_peaks(
-    state: tauri::State<'_, AppState>,
-    bars: Option<u32>,
-) -> Result<Vec<f32>, String> {
-    let bar_count = bars.unwrap_or(160).clamp(32, 2048) as usize;
-
-    let source_path = {
-        let recorder = state
-            .recorder
-            .lock()
-            .map_err(|_| "failed to lock recorder state".to_string())?;
-        recorder.source_video_path.clone()
-    };
-
-    let Some(source_path) = source_path else {
-        return Ok(vec![0.0; bar_count]);
-    };
-
-    extract_audio_waveform_peaks(std::path::Path::new(&source_path), bar_count)
 }
 
 #[tauri::command]

@@ -1,3 +1,5 @@
+import { Slider } from "../ui/slider";
+
 // Reusable slider row used across inspector sub-panels.
 export function SliderRow({
   label,
@@ -37,13 +39,12 @@ export function SliderRow({
           )}
         </div>
       </div>
-      <input
-        className="w-full cursor-pointer accent-[#9b88ff]"
-        type="range"
+      <Slider
         min={min}
         max={max}
-        value={value}
-        onChange={(e) => onChange(Number(e.currentTarget.value))}
+        value={[value]}
+        onValueChange={(v) => onChange(v[0])}
+        className="**:data-[slot=slider-thumb]:bg-red-500"
       />
     </div>
   );
