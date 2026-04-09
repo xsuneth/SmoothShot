@@ -1,5 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SyntheticEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Player } from "@remotion/player";
+import type { PlayerRef } from "@remotion/player";
+import { RemotionPreviewComposition } from "./RemotionPreviewComposition";
 
 import type {
   BackgroundStyle,
@@ -16,6 +20,7 @@ import { backgroundCss } from "../lib/theme";
 // ── Cursor shape renderer ─────────────────────────────────────────────────────
 
 const SHADOW = "drop-shadow(0 3px 6px rgba(0,0,0,0.55))";
+const REMOTION_FPS = 60;
 
 function CursorIcon({ type }: { type: string }) {
   const base = "h-[clamp(18px,3.2cqh,36px)] w-[clamp(18px,3.2cqh,36px)]";
@@ -253,22 +258,16 @@ export function EditorPreview({
   onTogglePlay,
   onVideoError,
 }: EditorPreviewProps) {
+  const playerRef = useRef<PlayerRef | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const cameraRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const currentTimeRef = useRef(currentTimeMs);
+  const lastEmittedTimeRef = useRef(currentTimeMs);
+  const onTimeChangeRef = useRef(onTimeChange);
+  const onPlaybackEndedRef = useRef(onPlaybackEnded);
   const requestSequenceRef = useRef(0);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // How many auto-retries have fired for the current source URL.
-  const retryCountRef = useRef(0);
-  // Time (seconds) to seek to after a retry remount, so playback resumes at the right position.
-  const retryRestoreTimeRef = useRef(0);
-  // Whether playback was active at the moment the error fired.
-  const retryWasPlayingRef = useRef(false);
   const [previewFrame, setPreviewFrame] = useState<PreviewFrameResponse | null>(null);
   const [isLoadingFrame, setIsLoadingFrame] = useState(false);
-  // Bumped on each retry attempt to remount the <video> element with a fresh src.
-  const [videoRetryKey, setVideoRetryKey] = useState(0);
   const [mediaDurationMs, setMediaDurationMs] = useState(0);
   const [mediaDimensions, setMediaDimensions] = useState<{ width: number; height: number } | null>(null);
   const stageBackground = backgroundCss(backgroundStyle);
@@ -292,6 +291,12 @@ export function EditorPreview({
     1,
     previewUrl && mediaDurationMs > 0 ? mediaDurationMs : sessionDurationMs,
   );
+  const durationInFrames = Math.max(1, Math.ceil((playbackDurationMs / 1000) * REMOTION_FPS));
+  const timeMsToFrame = useCallback((timeMs: number) => {
+    if (durationInFrames <= 1 || playbackDurationMs <= 0) return 0;
+    const progress = clamp(timeMs / playbackDurationMs, 0, 1);
+    return Math.round(progress * (durationInFrames - 1));
+  }, [durationInFrames, playbackDurationMs]);
 
   const cursorTimelineTimeMs = useMemo(() => {
     if (!cursorTimelineRange) return currentTimeMs;
@@ -304,9 +309,13 @@ export function EditorPreview({
     () => interpolateCursor(orderedCursorTrack, cursorTimelineTimeMs),
     [orderedCursorTrack, cursorTimelineTimeMs],
   );
-  // Cursor coordinates come from frame metadata, so normalize against that space first.
-  const sourceWidth = activeCursor?.width ?? orderedCursorTrack[0]?.width ?? mediaDimensions?.width ?? previewFrame?.width ?? 1920;
-  const sourceHeight = activeCursor?.height ?? orderedCursorTrack[0]?.height ?? mediaDimensions?.height ?? previewFrame?.height ?? 1080;
+  // Keep cursor coordinates mapped to a stable source-space size.
+  const cursorSourceWidth = orderedCursorTrack[0]?.width ?? mediaDimensions?.width ?? previewFrame?.width ?? 1920;
+  const cursorSourceHeight = orderedCursorTrack[0]?.height ?? mediaDimensions?.height ?? previewFrame?.height ?? 1080;
+  const sourceWidth = mediaDimensions?.width ?? previewFrame?.width ?? cursorSourceWidth;
+  const sourceHeight = mediaDimensions?.height ?? previewFrame?.height ?? cursorSourceHeight;
+  const compositionWidth = Math.max(1, Math.round(mediaDimensions?.width ?? previewFrame?.width ?? sourceWidth));
+  const compositionHeight = Math.max(1, Math.round(mediaDimensions?.height ?? previewFrame?.height ?? sourceHeight));
   const previewAspectRatio =
     mediaDimensions?.width && mediaDimensions?.height
       ? mediaDimensions.width / mediaDimensions.height
@@ -320,8 +329,8 @@ export function EditorPreview({
     activeCursor!.cursorY >= 0 &&
     activeCursor!.cursorY < sourceHeight &&
     activeCursor!.cursorType !== "none";
-  const cursorLeft = activeCursor ? (activeCursor.cursorX / sourceWidth) * 100 : 50;
-  const cursorTop = activeCursor ? (activeCursor.cursorY / sourceHeight) * 100 : 50;
+  const cursorLeft = activeCursor ? (activeCursor.cursorX / cursorSourceWidth) * 100 : 50;
+  const cursorTop = activeCursor ? (activeCursor.cursorY / cursorSourceHeight) * 100 : 50;
 
   const { zoom, marker: zoomFocusMarker } = useMemo(
     () => liveZoomState(zoomMarkers, currentTimeMs, zoomInMs, zoomOutMs, maxZoom),
@@ -329,14 +338,17 @@ export function EditorPreview({
   );
 
   const focusXPercent = zoomFocusMarker && activeCursor && cursorInBounds
-    ? clamp((activeCursor.cursorX / sourceWidth) * 100, 5, 95)
+    ? clamp((activeCursor.cursorX / cursorSourceWidth) * 100, 5, 95)
     : 50;
   const focusYPercent = zoomFocusMarker && activeCursor && cursorInBounds
-    ? clamp((activeCursor.cursorY / sourceHeight) * 100, 5, 95)
+    ? clamp((activeCursor.cursorY / cursorSourceHeight) * 100, 5, 95)
     : 50;
   const translateX = (50 - focusXPercent) * (zoom - 1);
   const translateY = (50 - focusYPercent) * (zoom - 1);
   const effectiveInset = Math.max(0, Math.min(220, padding + inset));
+  const compositionInsetPx = Math.round(clamp(effectiveInset, 0, Math.min(compositionWidth, compositionHeight) * 0.35));
+  const cameraInsetPx = Math.round(clamp(Math.min(compositionWidth, compositionHeight) * 0.03, 12, 56));
+  const cameraWidthPx = Math.round(clamp(compositionWidth * 0.18, 120, 360));
   const shadowOpacity = Math.min(1, Math.max(0, shadow / 100));
   const shadowDistance = directionalShadow ? 28 : 0;
   const shadowRadians = (shadowAngle * Math.PI) / 180;
@@ -345,80 +357,137 @@ export function EditorPreview({
   const frameShadow = directionalShadow
     ? `${shadowX}px ${shadowY}px ${shadowBlur}px rgba(0,0,0,${(0.85 * shadowOpacity).toFixed(3)})`
     : `0 16px ${shadowBlur}px rgba(0,0,0,${(0.85 * shadowOpacity).toFixed(3)})`;
-  const cameraInset = "clamp(8px, 2.5cqw, 18px)";
-  const cameraCornerStyle = useMemo(() => {
-    if (cameraCorner === "top-left") return { top: cameraInset, left: cameraInset };
-    if (cameraCorner === "top-right") return { top: cameraInset, right: cameraInset };
-    if (cameraCorner === "bottom-left") return { bottom: cameraInset, left: cameraInset };
-    return { bottom: cameraInset, right: cameraInset };
-  }, [cameraCorner]);
-
   useEffect(() => {
     currentTimeRef.current = currentTimeMs;
-  }, [currentTimeMs]);
-
-  // Seek main video when scrubbing (not playing).
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || Number.isNaN(video.duration) || !Number.isFinite(video.duration)) return;
-    if (isPlaying) return;
-
-    const nextSeconds = currentTimeMs / 1000;
-    if (Math.abs(video.currentTime - nextSeconds) > 0.05) {
-      video.currentTime = nextSeconds;
-    }
-  }, [currentTimeMs, isPlaying]);
-
-  // Keep camera PiP in sync with main video while scrubbing.
-  useEffect(() => {
-    const cam = cameraRef.current;
-    if (!cam || Number.isNaN(cam.duration) || !Number.isFinite(cam.duration)) return;
-    if (isPlaying) return;
-
-    const nextSeconds = currentTimeMs / 1000;
-    if (Math.abs(cam.currentTime - nextSeconds) > 0.05) {
-      cam.currentTime = nextSeconds;
+    if (!isPlaying) {
+      lastEmittedTimeRef.current = currentTimeMs;
     }
   }, [currentTimeMs, isPlaying]);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = isMuted;
-  }, [isMuted]);
+    onTimeChangeRef.current = onTimeChange;
+  }, [onTimeChange]);
 
-  // Play/pause main video and camera PiP together.
   useEffect(() => {
-    const video = videoRef.current;
-    const cam = cameraRef.current;
+    onPlaybackEndedRef.current = onPlaybackEnded;
+  }, [onPlaybackEnded]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !previewUrl) return;
+    if (isPlaying) return;
+
+    const targetFrame = timeMsToFrame(currentTimeMs);
+    if (Math.abs(player.getCurrentFrame() - targetFrame) > 1) {
+      player.seekTo(targetFrame);
+    }
+  }, [currentTimeMs, durationInFrames, isPlaying, playbackDurationMs, previewUrl]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !previewUrl) return;
+
+    if (isMuted) {
+      player.mute();
+    } else {
+      player.unmute();
+    }
+  }, [isMuted, previewUrl]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !previewUrl) return;
 
     if (isPlaying) {
-      void video?.play().catch(() => {});
-      void cam?.play().catch(() => {});
-      return;
+      player.play();
+    } else {
+      player.pause();
     }
+  }, [isPlaying, previewUrl]);
 
-    video?.pause();
-    cam?.pause();
-  }, [isPlaying]);
+  // Directly control the native <video> element so Remotion's internal media-sync
+  // mechanism (useMediaPlayback) cannot interfere with playback.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !previewUrl) return;
+    if (isPlaying) {
+      void video.play().catch(() => {});
+    } else {
+      video.pause();
+    }
+  }, [isPlaying, previewUrl]);
 
-  // Drive currentTimeMs from the main video clock during playback.
+  // Seek the native video when paused and the playhead moves (e.g. user scrubs).
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !previewUrl || isPlaying) return;
+    const targetSec = currentTimeMs / 1000;
+    if (Math.abs(video.currentTime - targetSec) > 0.05) {
+      video.currentTime = targetSec;
+    }
+  }, [currentTimeMs, isPlaying, previewUrl]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !previewUrl) return;
+    const onEnded = () => { onPlaybackEndedRef.current(); };
+    player.addEventListener("ended", onEnded);
+    return () => { player.removeEventListener("ended", onEnded); };
+  }, [previewUrl]);
+
+  // Drive currentTimeMs from the video's exact presentation time.
+  // requestVideoFrameCallback fires once per displayed frame with the real mediaTime,
+  // giving perfect cursor/zoom sync. Falls back to rAF + video.currentTime polling
+  // on platforms that don't support rVFC (older WebKit).
   useEffect(() => {
     if (!isPlaying || !previewUrl) return;
+    const video = videoRef.current;
+    if (!video) return;
 
-    let frameId = 0;
+    let active = true;
 
-    const syncToVideoClock = () => {
-      const video = videoRef.current;
-      if (video && !video.paused) {
-        onTimeChange(video.currentTime * 1000);
+    if ("requestVideoFrameCallback" in video) {
+      let callbackId: number;
+
+      const onFrame = (
+        _: DOMHighResTimeStamp,
+        metadata: VideoFrameCallbackMetadata,
+      ) => {
+        if (!active) return;
+        const nextTimeMs = clamp(metadata.mediaTime * 1000, 0, playbackDurationMs);
+        if (nextTimeMs >= lastEmittedTimeRef.current + 4) {
+          lastEmittedTimeRef.current = nextTimeMs;
+          onTimeChangeRef.current(nextTimeMs);
+        }
+        callbackId = video.requestVideoFrameCallback(onFrame);
+      };
+
+      callbackId = video.requestVideoFrameCallback(onFrame);
+      return () => {
+        active = false;
+        video.cancelVideoFrameCallback(callbackId);
+      };
+    }
+
+    // Fallback: poll video.currentTime each animation frame.
+    // Re-read the ref to avoid TypeScript's "never" narrowing after the `in` branch above.
+    const videoEl = videoRef.current!;
+    let rafId: number;
+    const poll = () => {
+      if (!active) return;
+      const nextTimeMs = clamp(videoEl.currentTime * 1000, 0, playbackDurationMs);
+      if (nextTimeMs >= lastEmittedTimeRef.current + 4) {
+        lastEmittedTimeRef.current = nextTimeMs;
+        onTimeChangeRef.current(nextTimeMs);
       }
-      frameId = window.requestAnimationFrame(syncToVideoClock);
+      rafId = requestAnimationFrame(poll);
     };
-
-    frameId = window.requestAnimationFrame(syncToVideoClock);
-    return () => window.cancelAnimationFrame(frameId);
-  }, [isPlaying, onTimeChange, previewUrl]);
+    rafId = requestAnimationFrame(poll);
+    return () => {
+      active = false;
+      cancelAnimationFrame(rafId);
+    };
+  }, [isPlaying, previewUrl, playbackDurationMs]);
 
   // Fallback canvas-based frame preview (no video file yet).
   useEffect(() => {
@@ -470,22 +539,32 @@ export function EditorPreview({
     const canvas = canvasRef.current;
     if (!canvas || !previewFrame) return;
 
-    canvas.width = previewFrame.width;
-    canvas.height = previewFrame.height;
+    const width = Math.max(0, Math.floor(previewFrame.width));
+    const height = Math.max(0, Math.floor(previewFrame.height));
+    if (width === 0 || height === 0) return;
+
+    const expectedLength = width * height * 4;
+    const rgba = previewFrame.pixelsRgba ?? [];
+    if (rgba.length < expectedLength) {
+      // Some capture paths can return metadata before pixel bytes are ready.
+      // Skip drawing this frame to avoid ImageData construction errors.
+      return;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
 
     const context = canvas.getContext("2d");
     if (!context) return;
 
-    const data = new Uint8ClampedArray(previewFrame.pixelsRgba);
-    context.putImageData(new ImageData(data, previewFrame.width, previewFrame.height), 0, 0);
+    const data = new Uint8ClampedArray(rgba.slice(0, expectedLength));
+    context.putImageData(new ImageData(data, width, height), 0, 0);
   }, [previewFrame]);
 
   useEffect(() => {
     if (previewUrl) {
       setMediaDimensions(null);
       setMediaDurationMs(0);
-      retryCountRef.current = 0;
-      retryRestoreTimeRef.current = 0;
     }
   }, [previewUrl]);
 
@@ -530,177 +609,92 @@ export function EditorPreview({
               className="relative z-10 shrink-0 overflow-visible border border-white/10 bg-black/40 transition-transform duration-200"
               style={{
                 aspectRatio: previewAspectRatio,
-                width: `min(calc(100cqw - ${effectiveInset * 2}px), calc((100cqh - ${effectiveInset * 2}px) * ${previewAspectRatio}))`,
+                width: `min(100cqw, calc(100cqh * ${previewAspectRatio}))`,
                 borderRadius: `${roundedCorners}px`,
                 boxShadow: frameShadow,
                 transform: `scale(${scalePercent / 100})`,
               }}
             >
-              {/* Zoom + pan layer */}
-              <div
-                className="absolute inset-0 origin-center transition-transform duration-75 ease-linear"
-                style={{ transform: `translate(${translateX}%, ${translateY}%) scale(${zoom})` }}
-              >
-                {previewUrl ? (
-                  <video
-                    key={`${previewUrl}-${videoRetryKey}`}
-                    ref={videoRef}
-                    className="h-full w-full object-contain"
-                    src={previewUrl}
-                    playsInline
-                    preload="auto"
-                    onLoadedMetadata={(e) => {
-                      if (retryTimerRef.current) {
-                        clearTimeout(retryTimerRef.current);
-                        retryTimerRef.current = null;
-                      }
-                      const durationMs = Number.isFinite(e.currentTarget.duration)
-                        ? e.currentTarget.duration * 1000
-                        : 0;
-                      setMediaDurationMs(durationMs);
-                      onDurationChange(durationMs);
-                      if (e.currentTarget.videoWidth > 0 && e.currentTarget.videoHeight > 0) {
-                        setMediaDimensions({
-                          width: e.currentTarget.videoWidth,
-                          height: e.currentTarget.videoHeight,
-                        });
-                      }
-                      // After a retry remount, seek to slightly before where the error
-                      // happened.  Seeking to the exact same position would hit the same
-                      // corrupt/undecodable region again every retry, causing a visible
-                      // flash loop.  Jumping back ensures we land on the prior keyframe
-                      // (keyframe interval is ~1 s) so the decoder gets a clean start.
-                      if (retryRestoreTimeRef.current > 0) {
-                        const errorTime = retryRestoreTimeRef.current;
-                        retryRestoreTimeRef.current = 0;
-                        // Seek progressively further back on each successive retry so
-                        // persistent bad regions are skipped rather than replayed.
-                        const stepBack = Math.min(retryCountRef.current * 2, 10);
-                        e.currentTarget.currentTime = Math.max(0, errorTime - stepBack);
-                        if (retryWasPlayingRef.current) {
-                          void e.currentTarget.play().catch(() => {});
-                        }
-                      }
-                    }}
-                    onPlaying={() => {
-                      // Successful playback — reset retry budget.
-                      retryCountRef.current = 0;
-                    }}
-                    onStalled={(e) => {
-                      // Video stalled (e.g. Chromium stops buffering mid-seek on Windows).
-                      // Retry only if actually playing or the stall persists; give it 3 s first.
-                      if (retryCountRef.current >= 8) return;
-                      if (retryTimerRef.current) return; // already scheduled
-                      retryTimerRef.current = window.setTimeout(() => {
-                        const video = e.currentTarget;
-                        if (!video) return;
-                        // If still stalled (readyState < HAVE_FUTURE_DATA), remount.
-                        if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
-                          retryRestoreTimeRef.current = video.currentTime;
-                          retryWasPlayingRef.current = !video.paused;
-                          retryCountRef.current += 1;
-                          setVideoRetryKey((k) => k + 1);
-                        }
-                        retryTimerRef.current = null;
-                      }, 3000);
-                    }}
-                    onEnded={onPlaybackEnded}
-                    onError={(e) => {
-                      const code = e.currentTarget.error?.code;
-                      const MAX_RETRIES = 8;
-                      // Retry all recoverable error codes. Decode errors during playback
-                      // are common on Windows (asset.localhost range-request / moov-at-end)
-                      // and almost always resolve on a fresh element load.
-                      const isRetryable =
-                        code === MediaError.MEDIA_ERR_NETWORK ||
-                        code === MediaError.MEDIA_ERR_ABORTED ||
-                        code === MediaError.MEDIA_ERR_DECODE;
-                      if (isRetryable && retryCountRef.current < MAX_RETRIES) {
-                        retryRestoreTimeRef.current = e.currentTarget.currentTime;
-                        retryWasPlayingRef.current = !e.currentTarget.paused;
-                        retryCountRef.current += 1;
-                        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-                        // Decode errors are usually transient — short delay. Network errors need
-                        // longer to let the file finish flushing.
-                        const delay = code === MediaError.MEDIA_ERR_DECODE ? 300 : 1500;
-                        retryTimerRef.current = window.setTimeout(() => {
-                          setVideoRetryKey((k) => k + 1);
-                        }, delay);
-                        return;
-                      }
-                      // Exhausted retries or truly unrecoverable (unsupported source).
-                      retryCountRef.current = 0;
-                      const reason =
-                        code === MediaError.MEDIA_ERR_ABORTED ? "aborted" :
-                        code === MediaError.MEDIA_ERR_NETWORK ? "network" :
-                        code === MediaError.MEDIA_ERR_DECODE ? "decode" :
-                        code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "unsupported-source" :
-                        "unknown";
-                      onVideoError?.(`Could not load preview video (${reason}): ${previewUrl}`);
-                    }}
-                  />
-                ) : previewFrame ? (
-                  <canvas ref={canvasRef} className="h-full w-full object-contain" />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,#36285a_0%,#241b3f_44%,#191726_100%)]">
-                    <div className="max-w-140 text-center text-white">
-                      <p className="mb-3 text-xs uppercase tracking-[0.35em] text-white/45">SmoothShot Preview</p>
-                      <h2 className="mb-3 text-4xl font-medium tracking-[-0.03em]">
-                        {isLoadingFrame ? "Loading captured frame" : "Direct frame preview"}
-                      </h2>
-                      <p className="mx-auto max-w-115 text-sm leading-6 text-white/62">
-                        The editor is showing captured frames directly, with cursor and zoom layered on top.
-                      </p>
+              <Player
+                ref={playerRef}
+                component={RemotionPreviewComposition}
+                durationInFrames={durationInFrames}
+                compositionWidth={compositionWidth}
+                compositionHeight={compositionHeight}
+                fps={REMOTION_FPS}
+                controls={false}
+                autoPlay={false}
+                loop={false}
+                clickToPlay={false}
+                acknowledgeRemotionLicense
+                style={{ width: "100%", height: "100%" }}
+                inputProps={{
+                  stageBackground,
+                  backgroundBlur: backgroundStyle.blur,
+                  translateX,
+                  translateY,
+                  zoom,
+                  previewUrl,
+                  videoRef,
+                  canvasRef,
+                  hasPreviewFrame: Boolean(previewFrame),
+                  isLoadingFrame,
+                  isMuted,
+                  contentPaddingPx: compositionInsetPx,
+                  onLoadedMetadata: (e: SyntheticEvent<HTMLVideoElement, Event>) => {
+                    const durationMs = Number.isFinite(e.currentTarget.duration)
+                      ? e.currentTarget.duration * 1000
+                      : 0;
+                    setMediaDurationMs(durationMs);
+                    onDurationChange(durationMs);
+                    if (e.currentTarget.videoWidth > 0 && e.currentTarget.videoHeight > 0) {
+                      setMediaDimensions({
+                        width: e.currentTarget.videoWidth,
+                        height: e.currentTarget.videoHeight,
+                      });
+                    }
+                  },
+                  onPlaying: () => {},
+                  onStalled: () => {
+                    // In Player mode, stalled events can be transient during buffering.
+                    // Do not remount or seek here to avoid playhead jumps.
+                  },
+                  onError: () => {
+                    const video = videoRef.current;
+                    const code = video?.error?.code;
+                    const reason =
+                      code === MediaError.MEDIA_ERR_ABORTED ? "aborted" :
+                      code === MediaError.MEDIA_ERR_NETWORK ? "network" :
+                      code === MediaError.MEDIA_ERR_DECODE ? "decode" :
+                      code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "unsupported-source" :
+                      "unknown";
+                    const details = video?.error?.message ?? "video error";
+                    onVideoError?.(`Could not load preview video (${reason}): ${previewUrl} (${details})`);
+                    onPlaybackEnded();
+                  },
+                  cursorOverlay: showCursor && activeCursor && cursorInBounds ? (
+                    <div
+                      className="pointer-events-none absolute z-20"
+                      style={{
+                        left: `${cursorLeft}%`,
+                        top: `${cursorTop}%`,
+                        transform: `translate(-18%, -12%) scale(${cursorScale / 100})`,
+                        transformOrigin: "0 0",
+                      }}
+                    >
+                      <CursorIcon type={activeCursor.cursorType ?? "default"} />
                     </div>
-                  </div>
-                )}
-
-                          containerType: "size",
-                {/* Cursor overlay — lives INSIDE the zoom transform so it pans/scales with the video */}
-                {showCursor && activeCursor && cursorInBounds && (
-                  <div
-                    className="pointer-events-none absolute z-20"
-                    style={{
-                      left: `${cursorLeft}%`,
-                      top: `${cursorTop}%`,
-                      transform: `translate(-18%, -12%) scale(${cursorScale / 100})`,
-                      transformOrigin: "0 0",
-                    }}
-                  >
-                    <CursorIcon
-                      type={activeCursor.cursorType ?? "default"}
-                    />
-                  </div>
-                )}
-              </div>
+                  ) : null,
+                  cameraUrl,
+                  cameraCorner,
+                  cameraInsetPx,
+                  cameraWidthPx,
+                  cameraRoundness,
+                  cameraMirrored,
+                }}
+              />
 
             </div>
-
-            {/* Camera PiP overlay on full preview canvas */}
-            {cameraUrl && (
-              <div className="pointer-events-none absolute z-30" style={cameraCornerStyle}>
-                <div
-                  className="overflow-hidden shadow-[0_6px_24px_rgba(0,0,0,0.7)] ring-1 ring-white/25"
-                  style={{
-                    width: "clamp(88px, 18cqw, 160px)",
-                    aspectRatio: "15 / 14",
-                    borderRadius: `${cameraRoundness}px`,
-                  }}
-                >
-                  <video
-                    ref={cameraRef}
-                    className="h-full w-full object-cover"
-                    style={{
-                      transform: cameraMirrored ? "scaleX(-1)" : "none",
-                    }}
-                    src={cameraUrl}
-                    playsInline
-                    preload="auto"
-                    muted
-                  />
-                </div>
-              </div>
-            )}
 
             {/* Processing overlay — shown while FFmpeg is finalizing after stop */}
             {isProcessing && (

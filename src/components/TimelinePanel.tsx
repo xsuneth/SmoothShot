@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 import type { ClickEvent, ZoomMarker, ZoomPreviewResponse } from "../types";
 
@@ -7,6 +8,8 @@ type TimelinePanelProps = {
   currentTimeMs: number;
   durationMs: number;
   isPlaying: boolean;
+  isProcessing: boolean;
+  previewUrl: string | null;
   padding: number;
   scalePercent: number;
   timeline: ClickEvent[];
@@ -30,21 +33,47 @@ function formatTime(ms: number) {
   return `${seconds}.${tenths}s`;
 }
 
-/** Deterministic pseudo-random waveform height for bar at index i out of total */
-function waveformBar(i: number): number {
-  const a = Math.sin(i * 2.31 + 1.73) * 0.5 + 0.5;
-  const b = Math.sin(i * 0.71 + 3.14) * 0.5 + 0.5;
-  const c = Math.sin(i * 5.17 + 0.43) * 0.5 + 0.5;
-  return 0.10 + ((a + b + c) / 3) * 0.82;
-}
+const WAVEFORM_BARS = 160;
+const WAVEFORM_VIEWBOX_WIDTH = 1000;
+const WAVEFORM_VIEWBOX_HEIGHT = 100;
 
-const WAVEFORM_BARS = 120;
+function buildWaveformPaths(samples: number[]) {
+  if (samples.length < 2) {
+    return { fill: "", topLine: "", bottomLine: "" };
+  }
+
+  const W = WAVEFORM_VIEWBOX_WIDTH;
+  const centerY = WAVEFORM_VIEWBOX_HEIGHT / 2;
+  // Max amplitude = 85 % of the half-height, leaving a small gap at top/bottom edges
+  const maxAmp = centerY * 0.85;
+
+  const topPts = samples.map((v, i) => ({
+    x: (i / (samples.length - 1)) * W,
+    y: centerY - Math.min(1, Math.max(0, v)) * maxAmp,
+  }));
+  const botPts = samples.map((v, i) => ({
+    x: (i / (samples.length - 1)) * W,
+    y: centerY + Math.min(1, Math.max(0, v)) * maxAmp,
+  }));
+
+  const toPath = (pts: { x: number; y: number }[]) =>
+    pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+  const topLine = toPath(topPts);
+  const bottomLine = toPath(botPts);
+  // Closed fill: top-curve → reversed bottom-curve
+  const fill = `${topLine} ${[...botPts].reverse().map((p) => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")} Z`;
+
+  return { fill, topLine, bottomLine };
+}
 
 export function TimelinePanel({
   audioGain,
   currentTimeMs,
   durationMs,
   isPlaying,
+  isProcessing,
+  previewUrl,
   padding,
   scalePercent,
   timeline: _timeline,
@@ -65,6 +94,51 @@ export function TimelinePanel({
   const zoomTrackRef = useRef<HTMLDivElement>(null);
   const [draggingMarker, setDraggingMarker] = useState<{ id: string; mode: "move" | "start" | "end" } | null>(null);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
+  const [waveformBars, setWaveformBars] = useState<number[]>(() => Array.from({ length: WAVEFORM_BARS }, () => 0));
+  const waveformPaths = useMemo(() => buildWaveformPaths(waveformBars), [waveformBars]);
+  const startLabel = "0.0";
+  const endLabel = formatTime(effectiveDuration);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fallback = Array.from({ length: WAVEFORM_BARS }, () => 0);
+
+    async function buildWaveform() {
+      if (!previewUrl || isProcessing) {
+        setWaveformBars(fallback);
+        return;
+      }
+
+      try {
+        const peaks = await invoke<number[]>("get_audio_waveform_peaks", {
+          bars: WAVEFORM_BARS,
+        });
+
+        if (cancelled) return;
+
+        if (!Array.isArray(peaks) || peaks.length === 0) {
+          setWaveformBars(fallback);
+          return;
+        }
+
+        const normalized = peaks.map((value) => {
+          const v = Number.isFinite(value) ? value : 0;
+          return 0.04 + Math.min(1, Math.max(0, v)) * 0.90;
+        });
+        setWaveformBars(normalized);
+      } catch {
+        if (!cancelled) {
+          setWaveformBars(fallback);
+        }
+      }
+    }
+
+    void buildWaveform();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isProcessing, previewUrl]);
 
   // Build time ruler ticks at every second (capped to ~14 ticks)
   const rulerTicks = useMemo(() => {
@@ -160,106 +234,146 @@ export function TimelinePanel({
   }
 
   return (
-    <section className="shrink-0 select-none border-t border-white/6 bg-[#0c0d12] px-4 py-3 text-white">
-      {/* Controls bar */}
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 text-white/55 text-sm">
-          <button
-            type="button"
-            className="rounded-full border border-white/10 bg-white/5 p-1.5 transition hover:bg-white/10 hover:text-white"
-            onClick={onTogglePlay}
-          >
-            {isPlaying ? (
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-                <path d="M8 7h3v10H8zm5 0h3v10h-3z" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-                <path d="m9 7 8 5-8 5z" />
-              </svg>
-            )}
-          </button>
-          <span className="tabular-nums text-[0.75rem]">
-            <span className="text-white/80">{formatTime(currentTimeMs)}</span>
-            <span className="text-white/30"> / {formatTime(effectiveDuration)}</span>
-          </span>
-        </div>
-
-        <div className="flex items-center gap-3 text-[0.72rem] text-white/35">
-          {padding !== 32 && <span>Padding {padding}</span>}
-          {scalePercent !== 100 && <span>Scale {scalePercent}%</span>}
-          {audioGain !== 100 && <span>Audio {audioGain}%</span>}
-          {zoomPreview && <span>{zoomPreview.clickCount} zoom events</span>}
-        </div>
-      </div>
-
+    <section className="shrink-0 select-none border-t border-white/6 bg-[#0a0b10] px-4 py-3 text-white">
       {/* Timeline tracks */}
-      <div ref={timelineAreaRef} className="relative space-y-1.5">
+      <div ref={timelineAreaRef} className="relative space-y-2">
+
         {/* Time ruler */}
-        <div className="relative h-5">
+        <div className="relative h-6">
+          {/* Trim start scissors */}
+          {trimStartMs > 0 && (
+            <div
+              className="absolute top-0 flex flex-col items-center gap-0.5"
+              style={{ left: `${posPercent(trimStartMs)}%`, transform: "translateX(-50%)" }}
+            >
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-amber-400/80" fill="currentColor" aria-hidden>
+                <path d="M9.64 7.64c.23-.5.36-1.05.36-1.64a4 4 0 0 0-8 0 4 4 0 0 0 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4c0-.59-.13-1.14-.36-1.64L11 15l7 7h3v-1L9.64 7.64zM6 8a2 2 0 0 1-2-2 2 2 0 0 1 2-2 2 2 0 0 1 2 2 2 2 0 0 1-2 2zm0 12a2 2 0 0 1-2-2 2 2 0 0 1 2-2 2 2 0 0 1 2 2 2 2 0 0 1-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-7 7 2 2 7-7V3h-2z"/>
+              </svg>
+              <span className="text-[0.55rem] tabular-nums text-amber-400/60">{formatTime(trimStartMs)}</span>
+            </div>
+          )}
+
+          {/* Trim end scissors */}
+          {trimEndMs < effectiveDuration && (
+            <div
+              className="absolute top-0 flex flex-col items-center gap-0.5"
+              style={{ left: `${posPercent(trimEndMs)}%`, transform: "translateX(-50%)" }}
+            >
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 text-amber-400/80" fill="currentColor" aria-hidden>
+                <path d="M9.64 7.64c.23-.5.36-1.05.36-1.64a4 4 0 0 0-8 0 4 4 0 0 0 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4c0-.59-.13-1.14-.36-1.64L11 15l7 7h3v-1L9.64 7.64zM6 8a2 2 0 0 1-2-2 2 2 0 0 1 2-2 2 2 0 0 1 2 2 2 2 0 0 1-2 2zm0 12a2 2 0 0 1-2-2 2 2 0 0 1 2-2 2 2 0 0 1 2 2 2 2 0 0 1-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-7 7 2 2 7-7V3h-2z"/>
+              </svg>
+              <span className="text-[0.55rem] tabular-nums text-amber-400/60">{formatTime(trimEndMs)}</span>
+            </div>
+          )}
+
+          {/* Second ticks */}
           {rulerTicks.map((ms) => (
             <div
               key={ms}
               className="absolute flex flex-col items-center"
               style={{ left: `${posPercent(ms)}%`, transform: "translateX(-50%)" }}
             >
-              <div className="h-1.5 w-px bg-white/20" />
-              <span className="mt-0.5 text-[0.62rem] tabular-nums text-white/30">{formatTime(ms)}</span>
+              <div className="h-1 w-px bg-white/15" />
+              <span className="mt-0.5 text-[0.6rem] tabular-nums text-white/25">{formatTime(ms)}</span>
             </div>
           ))}
         </div>
 
-        {/* Amber clip track (with waveform) */}
+        {/* Amber clip track */}
         <div
           ref={trackRef}
-          className="relative h-12 cursor-pointer overflow-hidden rounded-xl border border-[#4a3208] bg-[#12090000]"
+          className="relative h-14 cursor-pointer overflow-hidden rounded-lg"
+          style={{ background: "#7a5005" }}
           onPointerDown={handleTrackPointerDown}
           role="slider"
           aria-valuemin={0}
           aria-valuemax={effectiveDuration}
           aria-valuenow={currentTimeMs}
         >
-          {/* Track fill */}
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,#c48a14_0%,#a36708_100%)]" />
+          {/* Amber gradient base */}
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,#c9900e_0%,#8a5c05_100%)]" />
 
-          {/* Waveform bars */}
-          <div className="pointer-events-none absolute inset-0 flex items-center gap-px px-1">
-            {Array.from({ length: WAVEFORM_BARS }, (_, i) => {
-              const h = waveformBar(i);
-              return (
-                <div
-                  key={i}
-                  className="flex-1 rounded-sm bg-[rgba(255,255,255,0.22)]"
-                  style={{ height: `${h * 100}%` }}
-                />
-              );
-            })}
+          {/* Centered mirrored waveform — full height */}
+          <svg
+            className="pointer-events-none absolute inset-0"
+            width="100%"
+            height="100%"
+            viewBox={`0 0 ${WAVEFORM_VIEWBOX_WIDTH} ${WAVEFORM_VIEWBOX_HEIGHT}`}
+            preserveAspectRatio="none"
+            aria-hidden
+          >
+            {/* Filled region between top and bottom */}
+            {waveformPaths.fill && (
+              <path d={waveformPaths.fill} fill="rgba(255, 230, 140, 0.22)" />
+            )}
+            {/* Top outline */}
+            {waveformPaths.topLine && (
+              <path
+                d={waveformPaths.topLine}
+                fill="none"
+                stroke="rgba(255, 230, 120, 0.85)"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+            {/* Bottom outline (mirror) */}
+            {waveformPaths.bottomLine && (
+              <path
+                d={waveformPaths.bottomLine}
+                fill="none"
+                stroke="rgba(255, 230, 120, 0.85)"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+          </svg>
+
+          {/* Clip label — centered */}
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5">
+            <div className="flex items-center gap-1 text-[0.65rem] font-semibold text-white/70">
+              <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <rect x="2" y="6" width="20" height="12" rx="2" />
+                <path d="M7 6v12M17 6v12" />
+                <path d="M2 10h3M2 14h3M19 10h3M19 14h3" />
+              </svg>
+              Clip
+            </div>
+            <span className="text-[0.58rem] tabular-nums text-white/45">
+              {endLabel} &middot; 1x
+            </span>
           </div>
 
-          {/* Highlight sheen */}
-          <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.12)_0%,transparent_60%)]" />
+          {/* Corner timestamps */}
+          <span className="pointer-events-none absolute left-2 bottom-1.5 text-[0.55rem] tabular-nums text-white/40 leading-none">{startLabel}</span>
+          <span className="pointer-events-none absolute right-2 bottom-1.5 text-[0.55rem] tabular-nums text-white/40 leading-none">{endLabel}</span>
 
-          {/* Trim region — grey out outside trim */}
+          {/* Inner top highlight sheen */}
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/20" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-black/30" />
+
+          {/* Trim region — darken outside trim */}
           <div
-            className="pointer-events-none absolute inset-y-0 left-0 bg-black/40"
+            className="pointer-events-none absolute inset-y-0 left-0 bg-black/50"
             style={{ width: `${posPercent(trimStartMs)}%` }}
           />
           <div
-            className="pointer-events-none absolute inset-y-0 right-0 bg-black/40"
+            className="pointer-events-none absolute inset-y-0 right-0 bg-black/50"
             style={{ width: `${100 - posPercent(trimEndMs)}%` }}
           />
 
           {/* Trim handles */}
           <div
-            className="pointer-events-none absolute inset-y-0 z-10 w-0.5 bg-white/60"
+            className="pointer-events-none absolute inset-y-0 z-10 w-0.5 bg-white/70"
             style={{ left: `${posPercent(trimStartMs)}%` }}
           />
           <div
-            className="pointer-events-none absolute inset-y-0 z-10 w-0.5 bg-white/60"
+            className="pointer-events-none absolute inset-y-0 z-10 w-0.5 bg-white/70"
             style={{ left: `${posPercent(trimEndMs)}%` }}
           />
 
-          {/* Hidden range inputs for trim */}
+          {/* Seek range input (transparent, on top) */}
           <input
             className="absolute inset-0 z-30 h-full w-full cursor-pointer opacity-0"
             type="range"
@@ -276,7 +390,7 @@ export function TimelinePanel({
             {zoomMarkers.map((marker) => (
               <div
                 key={marker.id}
-                className="absolute inset-y-1 rounded-md bg-[linear-gradient(135deg,#7d5dff,#5038d8)] shadow-[0_2px_8px_rgba(125,93,255,0.35)] cursor-move"
+                className="absolute inset-y-0 cursor-move rounded-lg bg-[#4a3fdb] shadow-[inset_0_1px_0_rgba(255,255,255,0.15),0_2px_8px_rgba(74,63,219,0.5)]"
                 style={{
                   left: `${posPercent(marker.startMs)}%`,
                   width: `${Math.max(posPercent(marker.endMs) - posPercent(marker.startMs), 2)}%`,
@@ -286,44 +400,58 @@ export function TimelinePanel({
               >
                 {/* resize handles */}
                 <div
-                  className="absolute inset-y-0 left-0 w-2 cursor-ew-resize rounded-l-md bg-white/20"
+                  className="absolute inset-y-0 left-0 w-2 cursor-ew-resize rounded-l-lg bg-white/10 hover:bg-white/20"
                   onPointerDown={(e) => { e.stopPropagation(); setDraggingMarker({ id: marker.id, mode: "start" }); }}
                 />
                 <div
-                  className="absolute inset-y-0 right-0 w-2 cursor-ew-resize rounded-r-md bg-white/20"
+                  className="absolute inset-y-0 right-0 w-2 cursor-ew-resize rounded-r-lg bg-white/10 hover:bg-white/20"
                   onPointerDown={(e) => { e.stopPropagation(); setDraggingMarker({ id: marker.id, mode: "end" }); }}
                 />
-                <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[0.6rem] font-medium text-white/80 truncate px-3">
-                  {marker.label}
-                </span>
+                {/* Zoom label */}
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-0.5">
+                  <div className="flex items-center gap-1 text-[0.65rem] font-semibold text-white/85">
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <path d="M4 6h2v2H4zM4 11h2v2H4zM4 16h2v2H4zM8 6h12M8 12h12M8 17h12" />
+                    </svg>
+                    Zoom
+                  </div>
+                  <span className="text-[0.58rem] text-white/50 truncate max-w-full px-4">
+                    {marker.label ?? "Auto"}
+                  </span>
+                </div>
               </div>
             ))}
           </div>
         )}
 
-        {/* Global playhead (ruler + all tracks) */}
+        {/* Playhead — blue circle + line, CSS transition smooths 30fps React updates */}
         <div
-          className="pointer-events-none absolute inset-y-0 z-40"
+          className={`pointer-events-none absolute inset-y-0 z-40 ${isPlaying ? "transition-[left] duration-[85ms] ease-linear" : ""}`}
           style={{ left: `${playheadPercent}%`, transform: "translateX(-50%)" }}
         >
+          {/* Circle handle */}
           <button
             type="button"
-            className="pointer-events-auto block h-2.5 w-2.5 cursor-ew-resize rounded-full border border-white/90 bg-[#0c0d12] shadow-[0_0_8px_rgba(255,255,255,0.45)]"
+            className="pointer-events-auto relative block h-4 w-4 cursor-ew-resize"
             aria-label="Drag playhead"
             onPointerDown={(e) => {
               e.preventDefault();
               e.stopPropagation();
               setIsDraggingPlayhead(true);
             }}
-          />
-          <div className="mx-auto h-[calc(100%-0.625rem)] w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.55)]" />
+          >
+            <div className="absolute inset-0 rounded-full bg-[#5b6af5] shadow-[0_0_10px_rgba(91,106,245,0.75)]" />
+            <div className="absolute inset-[3px] rounded-full bg-[#7e8cf8]/60" />
+          </button>
+          {/* Vertical line */}
+          <div className="mx-auto mt-0 h-[calc(100%-1rem)] w-[1.5px] bg-white/85 shadow-[0_0_4px_rgba(255,255,255,0.35)]" />
         </div>
       </div>
 
       {/* Trim scrubbers (invisible, on top) */}
       <div className="pointer-events-none absolute inset-0 opacity-0">
         <input
-          className="pointer-events-auto absolute top-[3.5rem] left-0 right-0 h-3 cursor-ew-resize"
+          className="pointer-events-auto absolute top-14 left-0 right-0 h-3 cursor-ew-resize"
           type="range"
           min={0}
           max={Math.max(trimEndMs - 250, 0)}
@@ -331,7 +459,7 @@ export function TimelinePanel({
           onChange={(e) => onTrimStartChange(Number(e.currentTarget.value))}
         />
         <input
-          className="pointer-events-auto absolute top-[3.5rem] left-0 right-0 h-3 cursor-ew-resize"
+          className="pointer-events-auto absolute top-14 left-0 right-0 h-3 cursor-ew-resize"
           type="range"
           min={Math.min(trimStartMs + 250, effectiveDuration)}
           max={effectiveDuration}

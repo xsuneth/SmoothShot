@@ -219,6 +219,8 @@ export function EditorApp() {
         currentTimeMs: playback.currentTimeMs,
         durationMs: sessionDurationMs,
         isPlaying: playback.isPlayingPreview,
+        isProcessing,
+        previewUrl,
         padding,
         scalePercent,
         timeline,
