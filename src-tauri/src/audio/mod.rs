@@ -141,16 +141,12 @@ pub fn stop_and_mux_audio(
 
     let sys = handles.sys_audio_path.as_deref();
     let mic = handles.mic_audio_path.as_deref();
-
     let has_sys = sys.map(|p| p.exists()).unwrap_or(false);
     let has_mic = mic.map(|p| p.exists()).unwrap_or(false);
 
     if !has_sys && !has_mic {
-        // No audio — just rename the raw video to the final output.
-        if video_path != output_path {
-            std::fs::rename(video_path, output_path)
-                .map_err(|e| format!("rename video_raw to source: {e}"))?;
-        }
+        // No audio — still remux to normalize MP4 container/metadata.
+        remux_video_only(video_path, output_path)?;
         return Ok(());
     }
 
@@ -170,6 +166,44 @@ pub fn stop_and_mux_audio(
     Ok(())
 }
 
+fn remux_video_only(video_path: &Path, output_path: &Path) -> Result<(), String> {
+    let ffmpeg = resolve_ffmpeg()?;
+    let mut cmd = Command::new(ffmpeg);
+    let temp_output = output_path.with_extension("remuxing.mp4");
+
+    cmd.arg("-y")
+        .arg("-i")
+        .arg(video_path)
+        .arg("-map")
+        .arg("0:v:0")
+        .arg("-c:v")
+        .arg("copy")
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg(&temp_output);
+
+    let status = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("FFmpeg video remux failed to start: {e}"))?;
+
+    if status.success() {
+        std::fs::rename(&temp_output, output_path)
+            .map_err(|e| format!("failed to finalize remuxed source video: {e}"))?;
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(&temp_output);
+
+    if video_path != output_path {
+        std::fs::rename(video_path, output_path)
+            .map_err(|e| format!("video remux failed and rename fallback also failed: {e}"))?;
+    }
+
+    Ok(())
+}
+
 fn mux_with_ffmpeg(
     video_path: &Path,
     sys_audio: Option<&Path>,
@@ -180,6 +214,7 @@ fn mux_with_ffmpeg(
 ) -> Result<(), String> {
     let ffmpeg = resolve_ffmpeg()?;
     let mut cmd = Command::new(ffmpeg);
+    let temp_output = output_path.with_extension("muxing.mp4");
 
     cmd.arg("-y").arg("-i").arg(video_path);
 
@@ -208,7 +243,7 @@ fn mux_with_ffmpeg(
     cmd.arg("-c:v").arg("copy");
     cmd.arg("-c:a").arg("aac").arg("-b:a").arg("256k");
     cmd.arg("-movflags").arg("+faststart");
-    cmd.arg(output_path);
+    cmd.arg(&temp_output);
 
     let status = cmd
         .stdout(std::process::Stdio::null())
@@ -217,11 +252,15 @@ fn mux_with_ffmpeg(
         .map_err(|e| format!("FFmpeg mux failed to start: {e}"))?;
 
     if !status.success() {
+        let _ = std::fs::remove_file(&temp_output);
         return Err(format!(
             "FFmpeg mux exited with code {:?}",
             status.code()
         ));
     }
+
+    std::fs::rename(&temp_output, output_path)
+        .map_err(|e| format!("failed to finalize muxed source video: {e}"))?;
 
     Ok(())
 }

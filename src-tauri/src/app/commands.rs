@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::app::state::AppState;
 use crate::audio::{
+    extract_audio_waveform_peaks,
     list_dshow_video_devices, list_input_mic_devices, start_audio_capture, stop_and_mux_audio,
     AudioConfig, AudioStatus,
 };
@@ -54,7 +55,8 @@ pub fn start_recording(
         display_index: None,
     });
 
-    let target_fps = request.fps.unwrap_or(60).clamp(24, 60);
+    // Force recording to 60 FPS for consistently smooth motion.
+    let target_fps = 60;
     let region = request.region.clone();
     let display_index = request.display_index;
     let screens = Screen::all().map_err(|err| format!("failed to enumerate displays: {err}"))?;
@@ -94,19 +96,19 @@ pub fn start_recording(
     let video_raw_path = session_folder.join("video_raw.mp4");
     let source_video_path = session_folder.join("source.mp4");
 
-    // Resolve the correct ddagrab output_idx by matching DXGI desktop coordinates.
-    // The screenshots crate and DXGI may enumerate monitors in different orders, so
-    // we match by origin rather than trusting the raw enumeration index.
-    #[cfg(target_os = "windows")]
-    let dxgi_output_idx = crate::capture::resolve_dxgi_output_idx(
-        capture_screen.display_info.x,
-        capture_screen.display_info.y,
-    );
-    #[cfg(not(target_os = "windows"))]
-    let dxgi_output_idx = display_index.unwrap_or(0);
+    // Keep the selected monitor index aligned with screenshots crate enumeration.
+    // This index is used by the platform-specific capture backend to pick the display.
+    let selected_display_idx = screens
+        .iter()
+        .position(|screen| {
+            screen.display_info.id == capture_screen.display_info.id
+                && screen.display_info.x == capture_screen.display_info.x
+                && screen.display_info.y == capture_screen.display_info.y
+        })
+        .unwrap_or(display_index.unwrap_or(0));
 
     let session_capture = SessionCaptureConfig {
-        display_index: dxgi_output_idx,
+        display_index: selected_display_idx,
         display_origin_x: capture_screen.display_info.x,
         display_origin_y: capture_screen.display_info.y,
         region: request.region,
@@ -367,7 +369,11 @@ pub fn stop_recording(
                 &audio_config_snapshot,
             ) {
                 eprintln!("[stop_recording] audio mux failed (non-fatal): {e}");
-                if !std::path::Path::new(&source_video).exists() {
+                let source_missing_or_empty = std::fs::metadata(&source_video)
+                    .map(|meta| meta.len() == 0)
+                    .unwrap_or(true);
+                if source_missing_or_empty {
+                    let _ = std::fs::remove_file(&source_video);
                     let _ = std::fs::rename(&video_raw, &source_video);
                 }
             }
@@ -1009,6 +1015,28 @@ pub fn get_audio_status(state: tauri::State<'_, AppState>) -> Result<AudioStatus
         .map_err(|_| "failed to lock audio config".to_string())?;
 
     Ok(AudioStatus::from_config(&config))
+}
+
+#[tauri::command]
+pub fn get_audio_waveform_peaks(
+    state: tauri::State<'_, AppState>,
+    bars: Option<usize>,
+) -> Result<Vec<f32>, String> {
+    let bars = bars.unwrap_or(160).clamp(1, 4096);
+
+    let source_video_path = {
+        let recorder = state
+            .recorder
+            .lock()
+            .map_err(|_| "failed to lock recorder state".to_string())?;
+        recorder.source_video_path.clone()
+    };
+
+    let Some(path) = source_video_path else {
+        return Ok(vec![0.0; bars]);
+    };
+
+    extract_audio_waveform_peaks(std::path::Path::new(&path), bars)
 }
 
 #[tauri::command]

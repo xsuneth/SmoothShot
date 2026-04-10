@@ -12,6 +12,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+#[cfg(target_os = "windows")]
+use crabgrab::feature::bitmap::{BoxedSliceFrameBitmap, VideoFrameBitmap};
+#[cfg(target_os = "windows")]
+use crabgrab::prelude::{
+    CapturableContent, CapturableContentFilter, CaptureConfig, CapturePixelFormat, CaptureStream,
+    StreamEvent,
+};
+
 use crate::export::ffmpeg_sidecar::resolve_ffmpeg;
 
 // ── Public data types ──────────────────────────────────────────────────────────
@@ -167,7 +175,16 @@ fn spawn_source_video_writer(
         .arg("-f")
         .arg("rawvideo")
         .arg("-pixel_format")
-        .arg("rgba")
+        .arg({
+            #[cfg(target_os = "windows")]
+            {
+                "bgra"
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                "rgba"
+            }
+        })
         .arg("-video_size")
         .arg(format!("{width}x{height}"))
         .arg("-framerate")
@@ -182,6 +199,12 @@ fn spawn_source_video_writer(
         .arg("libx264")
         .arg("-pix_fmt")
         .arg("yuv420p")
+        .arg("-tune")
+        .arg("zerolatency")
+        .arg("-r")
+        .arg(target_fps.max(1).to_string())
+        .arg("-g")
+        .arg(target_fps.max(1).to_string())
         .arg("-preset")
         .arg("ultrafast");
 
@@ -210,7 +233,7 @@ fn spawn_source_video_worker(
     target_fps: u32,
 ) -> Result<SourceVideoWorker, String> {
     let writer = spawn_source_video_writer(output_path, width, height, target_fps)?;
-    let (sender, receiver) = sync_channel::<SourceVideoFrame>(8);
+    let (sender, receiver) = sync_channel::<SourceVideoFrame>(32);
 
     let handle = thread::spawn(move || {
         let mut writer = writer;
@@ -613,7 +636,8 @@ pub fn capture_loop(
         if let Some(path) = source_video_path.as_ref().map(PathBuf::from) {
             capture_loop_windows(
                 target_fps,
-                &session_capture,
+                capture_screen,
+                session_capture,
                 stop_signal,
                 pause_signal,
                 started_at,
@@ -639,85 +663,100 @@ pub fn capture_loop(
 }
 
 #[cfg(target_os = "windows")]
-fn build_ddagrab_filter(session_capture: &SessionCaptureConfig, target_fps: u32) -> String {
-    let (offset_x, offset_y, width, height) = if let Some(region) = &session_capture.region {
-        (
-            region.x - session_capture.display_origin_x,
-            region.y - session_capture.display_origin_y,
-            region.width,
-            region.height,
-        )
-    } else {
-        (
-            0,
-            0,
-            session_capture.source_width,
-            session_capture.source_height,
-        )
-    };
+fn build_capture_token() -> Result<crabgrab::capture_stream::CaptureAccessToken, String> {
+    if let Some(token) = CaptureStream::test_access(false) {
+        return Ok(token);
+    }
 
-    format!(
-        "ddagrab=output_idx={}:framerate={}:draw_mouse=0:video_size={}x{}:offset_x={}:offset_y={}:dup_frames=1,hwdownload,format=bgra,format=nv12[v]",
-        session_capture.display_index,
-        target_fps.max(1),
-        width.max(1),
-        height.max(1),
-        offset_x.max(0),
-        offset_y.max(0),
-    )
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|err| format!("failed to create tokio runtime for capture access: {err}"))?;
+    runtime
+        .block_on(CaptureStream::request_access(false))
+        .ok_or_else(|| "screen capture access denied".to_string())
 }
 
-/// Spawn FFmpeg ddagrab — video only, no audio inputs.
-/// Audio is captured in separate threads and muxed after stop.
 #[cfg(target_os = "windows")]
-fn spawn_source_capture_process(
-    output_path: &PathBuf,
+fn build_capture_stream(
+    display_index: usize,
+) -> Result<(
+    CaptureStream,
+    std::sync::mpsc::Receiver<Result<StreamEvent, crabgrab::capture_stream::StreamError>>,
+), String> {
+    let token = build_capture_token()?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|err| format!("failed to create tokio runtime for display discovery: {err}"))?;
+
+    let content = runtime
+        .block_on(CapturableContent::new(CapturableContentFilter::DISPLAYS))
+        .map_err(|err| format!("failed to enumerate capturable displays: {err}"))?;
+
+    let display = content
+        .displays()
+        .nth(display_index)
+        .ok_or_else(|| format!("display index {display_index} not found for capture"))?;
+
+    let config = CaptureConfig::with_display(display, CapturePixelFormat::Bgra8888)
+        .with_show_cursor(false)
+        .with_buffer_count(4);
+
+    let (event_sender, event_receiver) = std::sync::mpsc::channel();
+    let stream = CaptureStream::new(token, config, move |event| {
+        let _ = event_sender.send(event);
+    })
+    .map_err(|err| format!("failed to start CrabGrab capture stream: {err}"))?;
+
+    Ok((stream, event_receiver))
+}
+
+#[cfg(target_os = "windows")]
+fn extract_rgba_from_bgra_bitmap(
+    bitmap: &crabgrab::feature::bitmap::FrameBitmapBgraUnorm8x4<Box<[[u8; 4]]>>,
     session_capture: &SessionCaptureConfig,
-    target_fps: u32,
-) -> Result<Child, String> {
-    let ffmpeg = resolve_ffmpeg()?;
-    Command::new(ffmpeg)
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-nostats")
-        .arg("-y")
-        .arg("-filter_complex")
-        .arg(build_ddagrab_filter(session_capture, target_fps))
-        .arg("-map")
-        .arg("[v]")
-        .arg("-c:v")
-        .arg("h264_mf")
-        .arg("-hw_encoding")
-        .arg("1")
-        .arg("-scenario")
-        .arg("display_remoting")
-        .arg("-rate_control")
-        .arg("ld_vbr")
-        .arg("-b:v")
-        .arg("20000k")
-        .arg("-maxrate")
-        .arg("40000k")
-        .arg("-bufsize")
-        .arg("40000k")
-        .arg("-r")
-        .arg(target_fps.max(1).to_string())
-        .arg("-g")
-        .arg(target_fps.max(1).to_string())
-        .arg("-movflags")
-        .arg("+faststart")
-        .arg(output_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| format!("failed to start Desktop Duplication recorder: {err}"))
+) -> (Vec<u8>, u32, u32) {
+    let frame_width = bitmap.width;
+    let frame_height = bitmap.height;
+
+    let (offset_x, offset_y, crop_width, crop_height) = if let Some(region) = &session_capture.region {
+        let x = (region.x - session_capture.display_origin_x).max(0) as usize;
+        let y = (region.y - session_capture.display_origin_y).max(0) as usize;
+        let w = region.width as usize;
+        let h = region.height as usize;
+        (x, y, w, h)
+    } else {
+        (0, 0, frame_width, frame_height)
+    };
+
+    let start_x = offset_x.min(frame_width);
+    let start_y = offset_y.min(frame_height);
+    let width = crop_width.min(frame_width.saturating_sub(start_x)).max(1);
+    let height = crop_height.min(frame_height.saturating_sub(start_y)).max(1);
+
+    let source = bitmap.data.as_ref();
+    let source_bytes = unsafe {
+        std::slice::from_raw_parts(source.as_ptr() as *const u8, source.len().saturating_mul(4))
+    };
+    let mut out = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+
+    for row in 0..height {
+        let src_px_offset = (start_y + row)
+            .saturating_mul(frame_width)
+            .saturating_add(start_x)
+            .saturating_mul(4);
+        let row_bytes = width.saturating_mul(4);
+        let src_end = src_px_offset.saturating_add(row_bytes);
+        let dst_row_start = row.saturating_mul(width).saturating_mul(4);
+        out[dst_row_start..dst_row_start + row_bytes]
+            .copy_from_slice(&source_bytes[src_px_offset..src_end]);
+    }
+
+    (out, width as u32, height as u32)
 }
 
 #[cfg(target_os = "windows")]
 fn capture_loop_windows(
     target_fps: u32,
-    session_capture: &SessionCaptureConfig,
+    capture_screen: Screen,
+    session_capture: SessionCaptureConfig,
     stop_signal: Arc<AtomicBool>,
     pause_signal: Arc<AtomicBool>,
     _started_at: Instant,
@@ -725,77 +764,175 @@ fn capture_loop_windows(
     click_events: Arc<Mutex<Vec<ClickEvent>>>,
     source_video_path: PathBuf,
 ) {
-    let device_state = DeviceState::new();
-    let cursor_sample_hz = target_fps.max(1).saturating_mul(4).clamp(120, 240);
-    let target_frame_time = Duration::from_secs_f64(1.0 / cursor_sample_hz as f64);
-    let mut previous_buttons = vec![false; 8];
-    let mut ffmpeg_child =
-        spawn_source_capture_process(&source_video_path, session_capture, target_fps).ok();
+    let Ok((mut stream, event_receiver)) = build_capture_stream(session_capture.display_index) else {
+        capture_loop_polling(
+            target_fps,
+            capture_screen,
+            session_capture,
+            stop_signal,
+            pause_signal,
+            _started_at,
+            raw_frames,
+            click_events,
+            Some(source_video_path.to_string_lossy().to_string()),
+        );
+        return;
+    };
+
+    let mut source_writer: Option<SourceVideoWorker> = None;
+    let mut encoded_frame_count: u64 = 0;
+    let mut last_frame_pixels: Option<Vec<u8>> = None;
+    let frame_duration_ms = 1000.0 / target_fps.max(1) as f64;
     let capture_started_at = Instant::now();
 
-    while !stop_signal.load(Ordering::Relaxed) {
-        let frame_started = Instant::now();
+    let device_state = DeviceState::new();
+    let cursor_sample_hz = target_fps.max(1).saturating_mul(4).clamp(120, 240);
+    let cursor_sample_time = Duration::from_secs_f64(1.0 / cursor_sample_hz as f64);
+    let mut previous_buttons = vec![false; 8];
+    let mut last_cursor_sample = Instant::now();
 
-        // While paused: skip cursor/click tracking, just sleep and poll signals.
+    while !stop_signal.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now.duration_since(last_cursor_sample) >= cursor_sample_time {
+            last_cursor_sample = now;
+            if !pause_signal.load(Ordering::Relaxed) {
+                let mouse = device_state.get_mouse();
+                let timestamp_ms = capture_started_at.elapsed().as_millis();
+                let (global_x, global_y) =
+                    resolve_global_cursor_coords(mouse.coords.0, mouse.coords.1);
+                let (local_x, local_y) =
+                    global_to_frame_coords(global_x, global_y, &session_capture);
+
+                for (index, pressed_now) in mouse.button_pressed.iter().enumerate() {
+                    let pressed_before = previous_buttons.get(index).copied().unwrap_or(false);
+                    if *pressed_now && !pressed_before {
+                        if let Ok(mut events_guard) = click_events.lock() {
+                            events_guard.push(ClickEvent {
+                                timestamp_ms,
+                                cursor_x: local_x,
+                                cursor_y: local_y,
+                                button: button_name(index + 1),
+                            });
+                        }
+                    }
+                }
+                previous_buttons = mouse.button_pressed;
+            }
+        }
+
+        let event = match event_receiver.recv_timeout(Duration::from_millis(8)) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
         if pause_signal.load(Ordering::Relaxed) {
-            thread::sleep(target_frame_time);
             continue;
         }
 
-        let mouse = device_state.get_mouse();
-        let timestamp_ms = capture_started_at.elapsed().as_millis();
+        match event {
+            Ok(StreamEvent::Video(frame)) => {
+                let bitmap = match frame.get_bitmap() {
+                    Ok(bitmap) => bitmap,
+                    Err(_) => continue,
+                };
 
-        let (global_x, global_y) = resolve_global_cursor_coords(mouse.coords.0, mouse.coords.1);
+                let BoxedSliceFrameBitmap::BgraUnorm8x4(bgra_bitmap) = bitmap else {
+                    continue;
+                };
 
-        // Convert global desktop coordinates to capture-area-local coordinates.
-        let (local_x, local_y) = global_to_frame_coords(
-            global_x,
-            global_y,
-            session_capture,
-        );
+                let (pixels_rgba, frame_width, frame_height) =
+                    extract_rgba_from_bgra_bitmap(&bgra_bitmap, &session_capture);
+                let timestamp_ms = capture_started_at.elapsed().as_millis();
 
-        // Read cursor shape once per sample (cheap system call, cached by OS).
-        let cursor_type = get_cursor_type();
+                if source_writer.is_none() {
+                    if let Ok(writer) =
+                        spawn_source_video_worker(&source_video_path, frame_width, frame_height, target_fps)
+                    {
+                        source_writer = Some(writer);
+                    }
+                }
 
-        let current_buttons = mouse.button_pressed;
-        for (index, pressed_now) in current_buttons.iter().enumerate() {
-            let pressed_before = previous_buttons.get(index).copied().unwrap_or(false);
-            if *pressed_now && !pressed_before {
-                if let Ok(mut events_guard) = click_events.lock() {
-                    events_guard.push(ClickEvent {
+                if let Some(writer) = source_writer.as_mut() {
+                    let due_frame_count =
+                        ((timestamp_ms as f64 / frame_duration_ms).floor() as u64).saturating_add(1);
+                    let frames_to_write = due_frame_count
+                        .saturating_sub(encoded_frame_count)
+                        .max(1) as u32;
+
+                    match writer.sender.try_send(SourceVideoFrame {
+                        pixels_rgba: pixels_rgba.clone(),
+                        repeat: frames_to_write,
+                    }) {
+                        Ok(()) => {
+                            encoded_frame_count =
+                                encoded_frame_count.saturating_add(frames_to_write as u64);
+                        }
+                        Err(TrySendError::Full(frame)) => {
+                            if writer.sender.send(frame).is_ok() {
+                                encoded_frame_count =
+                                    encoded_frame_count.saturating_add(frames_to_write as u64);
+                            }
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            source_writer = None;
+                        }
+                    }
+                }
+
+                last_frame_pixels = Some(pixels_rgba);
+
+                let mouse = device_state.get_mouse();
+                let (global_x, global_y) =
+                    resolve_global_cursor_coords(mouse.coords.0, mouse.coords.1);
+                let (local_x, local_y) =
+                    global_to_frame_coords(global_x, global_y, &session_capture);
+
+                if let Ok(mut frames_guard) = raw_frames.lock() {
+                    frames_guard.push(RawFrame {
                         timestamp_ms,
+                        width: frame_width,
+                        height: frame_height,
                         cursor_x: local_x,
                         cursor_y: local_y,
-                        button: button_name(index + 1),
+                        cursor_type: get_cursor_type(),
+                        pixels_rgba: Vec::new(),
                     });
                 }
             }
-        }
-        previous_buttons = current_buttons;
-
-        if let Ok(mut frames_guard) = raw_frames.lock() {
-            frames_guard.push(RawFrame {
-                timestamp_ms,
-                width: session_capture.source_width,
-                height: session_capture.source_height,
-                cursor_x: local_x,
-                cursor_y: local_y,
-                cursor_type,
-                pixels_rgba: Vec::new(),
-            });
-        }
-
-        let elapsed = frame_started.elapsed();
-        if elapsed < target_frame_time {
-            thread::sleep(target_frame_time - elapsed);
+            Ok(StreamEvent::End) => break,
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
 
-    if let Some(mut child) = ffmpeg_child.take() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(b"q\n");
+    let _ = stream.stop();
+
+    if let Some(writer) = source_writer {
+        if let Some(last_pixels) = last_frame_pixels.as_ref() {
+            let final_timestamp_ms = capture_started_at.elapsed().as_millis();
+            let final_frame_count = ((final_timestamp_ms as f64 / frame_duration_ms).ceil() as u64)
+                .max(encoded_frame_count);
+
+            while encoded_frame_count < final_frame_count {
+                let repeat = (final_frame_count - encoded_frame_count).min(u32::MAX as u64) as u32;
+                if writer
+                    .sender
+                    .send(SourceVideoFrame {
+                        pixels_rgba: last_pixels.clone(),
+                        repeat,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                encoded_frame_count = encoded_frame_count.saturating_add(repeat as u64);
+            }
         }
-        let _ = child.wait();
+
+        let SourceVideoWorker { sender, handle } = writer;
+        drop(sender);
+        let _ = handle.join();
     }
 }
 
@@ -871,8 +1008,11 @@ fn capture_loop_polling(
                         encoded_frame_count =
                             encoded_frame_count.saturating_add(frames_to_write as u64);
                     }
-                    Err(TrySendError::Full(_)) => {
-                        // Let the next successful frame catch up in duration without stalling capture.
+                    Err(TrySendError::Full(frame)) => {
+                        if writer.sender.send(frame).is_ok() {
+                            encoded_frame_count =
+                                encoded_frame_count.saturating_add(frames_to_write as u64);
+                        }
                     }
                     Err(TrySendError::Disconnected(_)) => {
                         source_writer = None;
